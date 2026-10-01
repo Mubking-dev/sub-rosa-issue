@@ -27,6 +27,8 @@ export {
   type TransactionSubmitter,
 } from "./submitter.js";
 export {
+  SDK_ERROR_CODES,
+  sdkErrorCode,
   SubRosaClientConfigError,
   SubRosaMissingReturnValueError,
   SubRosaNetworkMismatchError,
@@ -38,6 +40,7 @@ export {
 export type {
   NetworkMismatchErrorParams,
   PreflightFailureKind,
+  SdkErrorCode,
   SubRosaPreflightErrorParams,
   TimeoutErrorParams,
 } from "./errors.js";

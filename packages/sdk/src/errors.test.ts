@@ -2,13 +2,17 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
+  SDK_ERROR_CODES,
+  sdkErrorCode,
   SubRosaClientConfigError,
   SubRosaSubmitError,
   SubRosaTransactionError,
   SubRosaMissingReturnValueError,
   SubRosaNetworkMismatchError,
+  SubRosaPreflightError,
   SubRosaTimeoutError,
 } from "./errors.js";
+import { StatusApiError, StatusJsonParseError } from "./status-client.js";
 import { SubRosaClient } from "./client.js";
 import { createFakeTime } from "@sub-rosa/time";
 
@@ -260,5 +264,68 @@ describe("custom polling settings with injected sleep", () => {
     assert.equal(txErr instanceof Error, true);
     assert.equal(missingErr instanceof Error, true);
     assert.equal(timeoutErr instanceof Error, true);
+  });
+});
+
+describe("sdkErrorCode", () => {
+  it("maps every SDK error class to its own code", () => {
+    const cases: Array<[unknown, string]> = [
+      [new SubRosaClientConfigError("bad config"), "CLIENT_CONFIG"],
+      [
+        new SubRosaNetworkMismatchError({
+          contractId: "C123",
+          configuredPassphrase: "testnet",
+          rpcPassphrase: "public",
+          rpcUrl: "https://rpc.example",
+          reason: "passphrase",
+        }),
+        "NETWORK_MISMATCH",
+      ],
+      [new SubRosaSubmitError("submit failed"), "SUBMIT_FAILED"],
+      [new SubRosaTransactionError("h", "FAILED"), "TRANSACTION_FAILED"],
+      [new SubRosaMissingReturnValueError("h"), "MISSING_RETURN_VALUE"],
+      [
+        new SubRosaPreflightError({ kind: "rpc_error", operation: "commit", message: "rpc down" }),
+        "PREFLIGHT_FAILED",
+      ],
+      [
+        new SubRosaTimeoutError({
+          hash: "h",
+          submitter: "s",
+          lastStatus: "NOT_FOUND",
+          timeoutMs: 1000,
+          pollIntervalMs: 100,
+        }),
+        "TRANSACTION_TIMEOUT",
+      ],
+      [new StatusApiError(503, { error: "unavailable" }), "STATUS_API_ERROR"],
+      [new StatusJsonParseError(200), "STATUS_INVALID_RESPONSE"],
+    ];
+
+    for (const [error, code] of cases) {
+      assert.equal(sdkErrorCode(error), code);
+    }
+    assert.deepEqual(
+      [...cases.map(([, code]) => code), "UNKNOWN"].sort(),
+      [...SDK_ERROR_CODES].sort(),
+      "every code in SDK_ERROR_CODES is reachable",
+    );
+  });
+
+  it("maps anything the SDK did not raise to UNKNOWN", () => {
+    assert.equal(sdkErrorCode(new Error("boom")), "UNKNOWN");
+    assert.equal(sdkErrorCode(new TypeError("fetch failed")), "UNKNOWN");
+    assert.equal(sdkErrorCode("string failure"), "UNKNOWN");
+    assert.equal(sdkErrorCode(null), "UNKNOWN");
+    assert.equal(sdkErrorCode(undefined), "UNKNOWN");
+  });
+
+  it("never echoes a code or name carried by the thrown value", () => {
+    const spoofed = Object.assign(new Error("bid 700 USDC"), {
+      name: "SubRosaSubmitError",
+      code: "bid 700 USDC from GAKZTF6H",
+    });
+    assert.equal(sdkErrorCode(spoofed), "UNKNOWN");
+    assert.equal(sdkErrorCode({ code: "STATUS_API_ERROR" }), "UNKNOWN");
   });
 });
