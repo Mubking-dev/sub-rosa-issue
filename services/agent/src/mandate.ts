@@ -36,6 +36,10 @@ export interface SessionMandatePayload {
   maxAppraisalSpendStroops: string;
   /** Expected per-call appraisal price (stroops); agent refuses if server asks more. */
   appraisalPriceStroops: string;
+  /** Expected appraisal payment asset (SEP-41 C...). Binds quote asset to mandate. */
+  appraisalAsset?: string;
+  /** Expected appraisal payment destination (payTo G...). Binds quote payTo. */
+  appraisalPayTo?: string;
   commitDeadline: number;
   issuedAt: number;
   expiresAt: number;
@@ -48,6 +52,104 @@ export interface SessionMandate extends SessionMandatePayload {
 
 export class MandateError extends Error {}
 export class MandateCapError extends MandateError {}
+
+/** Typed refusal for a drifted/unsafe appraisal quote — safe to show in traces. */
+export type AppraisalQuoteRefusalCode =
+  | "QUOTE_EXCEEDS_CAP"
+  | "QUOTE_SPEND_EXCEEDED"
+  | "QUOTE_ASSET_MISMATCH"
+  | "QUOTE_DESTINATION_MISMATCH"
+  | "QUOTE_EXPIRED"
+  | "QUOTE_INVALID"
+  | "QUOTE_BODY_EMPTY"
+  | "QUOTE_BODY_OVERSIZED"
+  | "QUOTE_BODY_CREDENTIALS";
+
+export interface AppraisalQuoteRefusalTrace {
+  type: "appraisal-quote-refusal";
+  code: AppraisalQuoteRefusalCode;
+  message: string;
+}
+
+export class AppraisalQuoteRefusalError extends MandateCapError {
+  readonly code: AppraisalQuoteRefusalCode;
+
+  constructor(code: AppraisalQuoteRefusalCode, message: string) {
+    super(message);
+    this.name = "AppraisalQuoteRefusalError";
+    this.code = code;
+  }
+
+  /** Serializable record the keeper / demo trace can render. */
+  toTraceRecord(): AppraisalQuoteRefusalTrace {
+    return {
+      type: "appraisal-quote-refusal",
+      code: this.code,
+      message: this.message,
+    };
+  }
+}
+
+/** Payment quote the agent must bind to the mandate before any transfer. */
+export interface MandateAppraisalQuote {
+  /** Expected SEP-41 token contract (C...). */
+  asset: string;
+  /** Quoted price in stroops (bigint or integer string). */
+  amount: bigint | string;
+  /** Expected destination (payTo) receiving the appraisal payment. */
+  destination: string;
+  /** Unix seconds after which the quote must no longer be paid. */
+  expiresAt: number;
+}
+
+/** Max appraisal request body the agent will ever pay for (bytes). */
+export const MAX_APPRAISAL_BODY_BYTES = 8192;
+
+const CREDENTIAL_LIKE_KEY = /(secret|password|passwd|token|authorization|private[\-_]?key|api[\-_]?key|seed|mnemonic)/i;
+
+function scanCredentialKeys(value: unknown, depth = 0): boolean {
+  if (depth > 8 || value === null || typeof value !== "object") return false;
+  if (Array.isArray(value)) return value.some((v) => scanCredentialKeys(v, depth + 1));
+  for (const key of Object.keys(value as Record<string, unknown>)) {
+    if (CREDENTIAL_LIKE_KEY.test(key)) return true;
+    if (scanCredentialKeys((value as Record<string, unknown>)[key], depth + 1)) return true;
+  }
+  return false;
+}
+
+/**
+ * Refuse an appraisal request body that is empty, oversized, or carries
+ * credential-like fields. Throws AppraisalQuoteRefusalError — callers must not
+ * submit any payment when this throws.
+ */
+export function assertAppraisalRequestBodyAllowed(body: string | Uint8Array | Buffer | undefined | null): void {
+  const len =
+    body == null ? 0 : typeof body === "string" ? Buffer.byteLength(body, "utf8") : body.length;
+  if (len === 0 || (typeof body === "string" && body.trim().length === 0)) {
+    throw new AppraisalQuoteRefusalError("QUOTE_BODY_EMPTY", "appraisal body must not be empty");
+  }
+  if (len > MAX_APPRAISAL_BODY_BYTES) {
+    throw new AppraisalQuoteRefusalError(
+      "QUOTE_BODY_OVERSIZED",
+      `appraisal body exceeds ${MAX_APPRAISAL_BODY_BYTES} bytes`,
+    );
+  }
+  if (typeof body === "string") {
+    try {
+      const parsed: unknown = JSON.parse(body);
+      if (scanCredentialKeys(parsed)) {
+        throw new AppraisalQuoteRefusalError(
+          "QUOTE_BODY_CREDENTIALS",
+          "appraisal body must not contain credential-like fields",
+        );
+      }
+    } catch (e) {
+      if (e instanceof AppraisalQuoteRefusalError) throw e;
+      // Non-JSON bodies are rejected downstream with a stable error; the
+      // credential scan only applies to parseable JSON.
+    }
+  }
+}
 
 function invalidNumericField(field: string): never {
   throw new MandateError(`invalid mandate ${field}`);
@@ -73,6 +175,16 @@ function validateMandateNumbers(payload: SessionMandatePayload): void {
   assertMandateIntegerString(payload.maxEscrowStroops, "maxEscrowStroops");
   assertMandateIntegerString(payload.maxAppraisalSpendStroops, "maxAppraisalSpendStroops");
   assertMandateIntegerString(payload.appraisalPriceStroops, "appraisalPriceStroops");
+  if (payload.appraisalAsset !== undefined) {
+    if (typeof payload.appraisalAsset !== "string" || payload.appraisalAsset.trim() === "") {
+      throw new MandateError("invalid mandate appraisalAsset");
+    }
+  }
+  if (payload.appraisalPayTo !== undefined) {
+    if (typeof payload.appraisalPayTo !== "string" || payload.appraisalPayTo.trim() === "") {
+      throw new MandateError("invalid mandate appraisalPayTo");
+    }
+  }
 }
 
 function validateMandateTimestampOrdering(payload: SessionMandatePayload): void {
@@ -143,6 +255,10 @@ export interface CreateMandateParams {
   maxEscrowStroops: bigint;
   maxAppraisalSpendStroops: bigint;
   appraisalPriceStroops: bigint;
+  /** Expected appraisal payment asset (C...). Binds quote asset to the mandate. */
+  appraisalAsset?: string;
+  /** Expected appraisal payment destination (payTo G...). Binds quote payTo. */
+  appraisalPayTo?: string;
   commitDeadline: number;
   /** Mandate validity window (seconds from now). Default 3600. */
   ttlSeconds?: number;
@@ -176,6 +292,8 @@ export function createSessionMandate(params: CreateMandateParams): {
     maxEscrowStroops: String(params.maxEscrowStroops),
     maxAppraisalSpendStroops: String(params.maxAppraisalSpendStroops),
     appraisalPriceStroops: String(params.appraisalPriceStroops),
+    appraisalAsset: params.appraisalAsset,
+    appraisalPayTo: params.appraisalPayTo,
     commitDeadline: params.commitDeadline,
     issuedAt: now,
     expiresAt: now + (params.ttlSeconds ?? 3600),
@@ -242,6 +360,102 @@ export function assertAppraisalSpendAllowed(
   if (next > BigInt(mandate.maxAppraisalSpendStroops)) {
     throw new MandateCapError(
       `appraisal spend ${next} would exceed mandate cap ${mandate.maxAppraisalSpendStroops}`,
+    );
+  }
+}
+
+function parseQuoteAmountToStroops(amount: MandateAppraisalQuote["amount"]): bigint {
+  if (typeof amount === "bigint") {
+    if (amount <= 0n) {
+      throw new AppraisalQuoteRefusalError("QUOTE_INVALID", "quote amount must be positive");
+    }
+    return amount;
+  }
+  if (typeof amount !== "string" || !/^(0|[1-9]\d*)$/.test(amount)) {
+    throw new AppraisalQuoteRefusalError("QUOTE_INVALID", "quote amount must be a stroops integer string");
+  }
+  const parsed = BigInt(amount);
+  if (parsed <= 0n) {
+    throw new AppraisalQuoteRefusalError("QUOTE_INVALID", "quote amount must be positive");
+  }
+  return parsed;
+}
+
+/**
+ * Bind a payment quote to the signed mandate before any Stellar transfer.
+ *
+ * Fails closed: amount above the per-call cap, cumulative spend above the
+ * session cap, asset/destination mismatch, or an expired quote all throw
+ * AppraisalQuoteRefusalError (a MandateCapError). Callers must not submit any
+ * payment when this throws; `err.toTraceRecord()` is safe for keeper traces.
+ */
+export function assertAppraisalQuoteAllowed(
+  mandate: SessionMandate,
+  quote: MandateAppraisalQuote,
+  opts?: {
+    spentSoFarStroops?: bigint;
+    nowSeconds?: number;
+    clock?: import("@sub-rosa/time").Clock;
+    /** Fallback when the mandate carries no appraisalAsset (operator config). */
+    expectedAsset?: string;
+    /** Fallback when the mandate carries no appraisalPayTo (operator config). */
+    expectedDestination?: string;
+  },
+): void {
+  if (!quote || typeof quote !== "object") {
+    throw new AppraisalQuoteRefusalError("QUOTE_INVALID", "quote must be an object");
+  }
+  if (typeof quote.asset !== "string" || quote.asset.trim() === "") {
+    throw new AppraisalQuoteRefusalError("QUOTE_INVALID", "quote asset must be a non-empty string");
+  }
+  if (typeof quote.destination !== "string" || quote.destination.trim() === "") {
+    throw new AppraisalQuoteRefusalError("QUOTE_INVALID", "quote destination must be a non-empty string");
+  }
+  if (!Number.isSafeInteger(quote.expiresAt) || quote.expiresAt < 0) {
+    throw new AppraisalQuoteRefusalError("QUOTE_INVALID", "quote expiresAt must be a safe integer");
+  }
+  const amount = parseQuoteAmountToStroops(quote.amount);
+
+  const now = opts?.nowSeconds ?? (opts?.clock ?? systemClock).nowSeconds();
+  if (!Number.isSafeInteger(now) || now < 0) {
+    throw new AppraisalQuoteRefusalError("QUOTE_INVALID", "quote check clock is invalid");
+  }
+  if (now > quote.expiresAt) {
+    throw new AppraisalQuoteRefusalError(
+      "QUOTE_EXPIRED",
+      `appraisal quote expired at ${quote.expiresAt} (now ${now})`,
+    );
+  }
+
+  const expectedAsset = mandate.appraisalAsset ?? opts?.expectedAsset;
+  if (expectedAsset !== undefined && quote.asset !== expectedAsset) {
+    throw new AppraisalQuoteRefusalError(
+      "QUOTE_ASSET_MISMATCH",
+      `appraisal quote asset ${quote.asset} does not match mandate ${expectedAsset}`,
+    );
+  }
+  const expectedDestination = mandate.appraisalPayTo ?? opts?.expectedDestination;
+  if (expectedDestination !== undefined && quote.destination !== expectedDestination) {
+    throw new AppraisalQuoteRefusalError(
+      "QUOTE_DESTINATION_MISMATCH",
+      `appraisal quote destination ${quote.destination} does not match mandate ${expectedDestination}`,
+    );
+  }
+
+  if (amount > BigInt(mandate.appraisalPriceStroops)) {
+    throw new AppraisalQuoteRefusalError(
+      "QUOTE_EXCEEDS_CAP",
+      `appraisal quote ${amount} exceeds mandate cap ${mandate.appraisalPriceStroops}`,
+    );
+  }
+  const spent = opts?.spentSoFarStroops ?? 0n;
+  if (typeof spent !== "bigint" || spent < 0n) {
+    throw new AppraisalQuoteRefusalError("QUOTE_INVALID", "spentSoFarStroops must be a non-negative bigint");
+  }
+  if (spent + amount > BigInt(mandate.maxAppraisalSpendStroops)) {
+    throw new AppraisalQuoteRefusalError(
+      "QUOTE_SPEND_EXCEEDED",
+      `appraisal spend ${spent + amount} would exceed mandate cap ${mandate.maxAppraisalSpendStroops}`,
     );
   }
 }

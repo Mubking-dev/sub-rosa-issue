@@ -12,7 +12,10 @@ let active = 0;
 let peak = 0;
 let read = async () => ({ label: "ok" });
 mock.module(new URL("../lib/time.tsx", import.meta.url).href, { namedExports: { useTime: () => time } });
-mock.module("@sub-rosa/sdk", { namedExports: { SubRosaClient: class {
+mock.module("@sub-rosa/sdk", { namedExports: {
+  ROUND_PHASE_LABELS: { Open: "Open", Reveal: "Reveal", Settled: "Settled" },
+  roundPhaseLabel: (phase: "Open" | "Reveal" | "Settled") => phase,
+  SubRosaClient: class {
   async getRound() { calls++; active++; peak = Math.max(peak, active); try { return await read(); } finally { active--; } }
   async getBidders() { return ["bidder"]; }
   async getBidState() { return { revealed_value: null }; }

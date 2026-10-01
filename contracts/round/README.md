@@ -25,6 +25,17 @@ user-facing message → suggested next action.
 cargo test -p sub-rosa-round
 ```
 
+### Shared settlement fixture
+
+[`fixtures/settlement-cases.txt`](fixtures/settlement-cases.txt) describes
+settle and void cases in one table. This crate drives the contract through
+every row (`settlement_fixture_drives_the_contract`,
+`settlement_fixture_guard_reasons_match_contract_rules`), and the keeper's
+settlement guard drives the same rows
+(`services/keeper/src/settlement-guard.test.ts`). Editing the numbers on one
+side only fails the other suite, so the guard's winner/refund rules cannot
+drift from the contract's.
+
 ## Related docs
 
 - [`docs/TECH_DESIGN.md`](../../docs/TECH_DESIGN.md) — system-wide architecture and storage model

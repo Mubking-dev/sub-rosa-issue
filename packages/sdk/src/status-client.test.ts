@@ -5,7 +5,9 @@ import {
   KeeperStatusClient,
   StatusApiError,
   StatusJsonParseError,
+  type StatusClientOptions,
 } from "./status-client.js";
+import { createFakeTime } from "@sub-rosa/time";
 import type { KeeperStatusResponse } from "./status.js";
 
 const SAMPLE_STATUS: KeeperStatusResponse = {
@@ -105,5 +107,82 @@ describe("KeeperStatusClient non-success responses", () => {
         return true;
       },
     );
+  });
+});
+
+describe("KeeperStatusClient readiness", () => {
+  const ROUND = {
+    roundId: "7", status: "Open", phase: "awaiting-drand", nextAction: "wait", commitDeadline: 1,
+    revealDeadline: 2, revealRound: 3, revealReady: false, commitClosed: false, revealWindowOpen: false,
+    voidableAfter: null, bidderCount: 0, revealedCount: 0, winner: null, winningValue: null,
+    clearingRule: "HighestBid", settlement: "none", lastKeeperAction: null, lastError: null, retryCount: 0,
+    updatedAt: "2026-01-01T00:00:00.000Z",
+  } as const;
+  const LIVE: KeeperStatusResponse = { ...SAMPLE_STATUS, rounds: [ROUND] };
+
+  /** Fetch that answers the first call and hangs (ignoring abort) afterwards. */
+  function fakeKeeper(bodies: Array<KeeperStatusResponse | "hang">): typeof fetch {
+    let call = 0;
+    return async () => {
+      const next = bodies[Math.min(call++, bodies.length - 1)];
+      if (next === "hang") return new Promise<Response>(() => {});
+      return new Response(JSON.stringify(next), { status: 200 });
+    };
+  }
+
+  function client(bodies: Array<KeeperStatusResponse | "hang">, extra: Partial<StatusClientOptions> = {}) {
+    const time = createFakeTime(1_700_000_000_000);
+    const c = new KeeperStatusClient({
+      baseURL: "http://keeper.test", timeoutMs: 5_000, scheduler: time.scheduler,
+      contractId: "C123", roundId: 7n, fetchImpl: fakeKeeper(bodies), ...extra,
+    });
+    return { c, time };
+  }
+
+  it("a response inside the deadline returns the live snapshot", async () => {
+    const { c, time } = client([LIVE]);
+    const verdict = await c.readiness();
+    assert.deepEqual(verdict, { ready: true, snapshot: LIVE });
+    assert.deepEqual(c.lastSnapshot, LIVE);
+    assert.equal(time.scheduler.pendingCount(), 0);
+  });
+
+  it("a timeout returns not-ready and drops the previous snapshot", async () => {
+    const { c, time } = client([LIVE, "hang"]);
+    assert.equal((await c.readiness()).ready, true);
+    const pending = c.readiness();
+    await new Promise((r) => setImmediate(r));
+    time.scheduler.advance(4_999);
+    await new Promise((r) => setImmediate(r));
+    time.scheduler.advance(1);
+    const verdict = await pending;
+    assert.equal(verdict.ready, false);
+    assert.equal(verdict.ready === false && verdict.reason, "timeout");
+    assert.ok(!("snapshot" in verdict));
+    assert.equal(c.lastSnapshot, null);
+  });
+
+  it("a mismatched contract id returns not-ready", async () => {
+    const { c } = client([LIVE, { ...LIVE, contractId: "COTHER" }]);
+    await c.readiness();
+    const verdict = await c.readiness();
+    assert.equal(verdict.ready === false && verdict.reason, "contract_mismatch");
+    assert.equal(c.lastSnapshot, null);
+  });
+
+  it("a body without the configured round returns not-ready", async () => {
+    const { c } = client([{ ...LIVE, rounds: [{ ...ROUND, roundId: "8" }] }]);
+    const verdict = await c.readiness();
+    assert.equal(verdict.ready === false && verdict.reason, "round_mismatch");
+  });
+
+  it("errors never include keeper URL userinfo", async () => {
+    const { c } = client([LIVE], {
+      baseURL: "http://operator:hunter2@keeper.test",
+      fetchImpl: async (url) => { throw new TypeError(`Request cannot be constructed from a URL that includes credentials: ${String(url)}`); },
+    });
+    const verdict = await c.readiness();
+    assert.equal(verdict.ready === false && verdict.reason, "unavailable");
+    assert.ok(verdict.ready === false && !verdict.error.includes("hunter2") && !verdict.error.includes("operator:"));
   });
 });

@@ -55,7 +55,10 @@ async function cmdVerify(path: string, jsonMode: boolean, artifactPath?: string)
     rawJson = readFileSync(path, "utf-8");
   } catch (e) {
     if (jsonMode) {
-      writeData(JSON.stringify(buildJsonOutput(null, null, `Cannot read file: ${normalizeError(e).message}`), null, 2));
+      writeData(JSON.stringify(buildJsonOutput(null, null, {
+        code: "parse_error",
+        message: `Cannot read file: ${normalizeError(e).message}`,
+      }), null, 2));
     } else {
       diagnostics.error("cannot-read", `Cannot read ${path}: ${normalizeError(e).message}`);
     }
@@ -67,7 +70,10 @@ async function cmdVerify(path: string, jsonMode: boolean, artifactPath?: string)
     receipt = parseReceipt(rawJson);
   } catch (e) {
     if (jsonMode) {
-      writeData(JSON.stringify(buildJsonOutput(null, null, `Invalid JSON: ${normalizeError(e).message}`), null, 2));
+      writeData(JSON.stringify(buildJsonOutput(null, null, {
+        code: "parse_error",
+        message: `Invalid JSON: ${normalizeError(e).message}`,
+      }), null, 2));
     } else {
       diagnostics.error("invalid-json", `Invalid JSON: ${normalizeError(e).message}`);
     }

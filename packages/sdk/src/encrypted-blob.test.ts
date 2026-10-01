@@ -7,17 +7,34 @@
 //   - Do not log raw blob contents.
 //   - Keep limits conservative and configurable only if the codebase already
 //     has config patterns.
+//
+// The `validateSealedBid` section is the bid acceptance rule. Its fixtures are
+// real `sealBid` output — produced offline against a stub Drand client that
+// serves quicknet's static public key — so the gate is checked against the
+// sealer it has to agree with rather than against a hand-written stand-in.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
+import { QUICKNET_HASH, commitment, generateAuditorKeypair, type SealedBid } from "@sub-rosa/tlock";
+import { SubRosaClientConfigError } from "./errors.js";
 import {
   validateEncryptedBlob,
+  validateSealedBid,
+  assertSealedBid,
   MAX_CIPHERTEXT_BYTES,
   MAX_AUDITOR_BLOB_BYTES,
   tryDecodeHex,
   tryDecodeBase64,
+  type SealedBidBinding,
 } from "./encrypted-blob.js";
+import {
+  BID_NONCE,
+  BID_ROUND,
+  BID_VALUE,
+  sealFixture,
+  fixtureBinding,
+} from "./testing/seal-fixture.js";
 
 // ── Helpers ──────────────────────────────────────────────────────────────
 
@@ -394,6 +411,305 @@ test("custom maxBytes can be more permissive than default", () => {
   });
   assert.equal(result.valid, true);
 });
+
+// ── Sealed-bid acceptance gate ────────────────────────────────────────────
+//
+// The gate a bid has to pass before it is committed. Three layers, matching
+// the sealer: the blob is well-formed tlock ciphertext, its lengths are the
+// ones the contract expects, and its commitment is re-derived from the
+// supplied value and nonce with tlock's own helper.
+
+/** Assert rejection and return the issue codes, for readable assertions. */
+function rejectionCodes(sealed: SealedBid, binding?: SealedBidBinding): string[] {
+  const result = validateSealedBid(sealed, binding);
+  assert.equal(result.valid, false, "expected the seal to be rejected");
+  return result.issues.map((issue) => issue.code);
+}
+
+// ── A real seal is accepted ───────────────────────────────────────────────
+
+test("accepts a blob produced by sealBid, with its value, nonce, and round", async () => {
+  const sealed = await sealFixture();
+  const result = validateSealedBid(sealed, fixtureBinding());
+
+  assert.equal(result.valid, true, JSON.stringify(result.issues));
+  assert.deepEqual(result.issues, []);
+  assertSealedBid(sealed, fixtureBinding());
+});
+
+test("accepts a sealBid blob carrying a selective-disclosure auditor blob", async () => {
+  const keypair = generateAuditorKeypair();
+  const sealed = await sealFixture({
+    identity: new TextEncoder().encode("GBIDDER...alice"),
+    auditorPublicKey: keypair.publicKey,
+  });
+  assert.ok(sealed.auditorBlob.length > 0);
+
+  const result = validateSealedBid(sealed, fixtureBinding());
+  assert.equal(result.valid, true, JSON.stringify(result.issues));
+});
+
+test("accepts a sealBid blob with an empty auditor blob (no identity disclosed)", async () => {
+  // `sealBid` emits an empty auditor blob when the bidder discloses nothing,
+  // and the contract takes `auditor_blob` as optional Bytes.
+  const sealed = await sealFixture();
+  assert.equal(sealed.auditorBlob.length, 0);
+  assert.equal(validateSealedBid(sealed, fixtureBinding()).valid, true);
+});
+
+test("accepts the structural checks alone, without a value, nonce, or round", async () => {
+  const sealed = await sealFixture();
+  const result = validateSealedBid(sealed);
+  assert.equal(result.valid, true, JSON.stringify(result.issues));
+});
+
+// ── Truncated blobs are rejected ──────────────────────────────────────────
+
+test("rejects a truncated ciphertext before commit", async () => {
+  const sealed = await sealFixture();
+  const truncated = { ...sealed, ciphertext: sealed.ciphertext.slice(0, 120) };
+  assert.deepEqual(rejectionCodes(truncated, fixtureBinding()), [
+    "invalid_sealed_payload",
+  ]);
+});
+
+test("rejects a ciphertext whose armor footer was cut off", async () => {
+  const sealed = await sealFixture();
+  const text = new TextDecoder().decode(sealed.ciphertext);
+  const stripped = new TextEncoder().encode(text.replace(/-----END AGE ENCRYPTED FILE-----\n?$/, ""));
+  assert.ok(rejectionCodes({ ...sealed, ciphertext: stripped }, fixtureBinding()).includes(
+    "invalid_sealed_payload",
+  ));
+});
+
+test("rejects an empty ciphertext", async () => {
+  const sealed = await sealFixture();
+  assert.ok(rejectionCodes({ ...sealed, ciphertext: new Uint8Array(0) }, fixtureBinding()).includes(
+    "empty_blob",
+  ));
+});
+
+test("rejects an oversized ciphertext", async () => {
+  const sealed = await sealFixture();
+  const padded = new Uint8Array(MAX_CIPHERTEXT_BYTES + 1).fill(0x61);
+  assert.ok(rejectionCodes({ ...sealed, ciphertext: padded }, fixtureBinding()).includes(
+    "blob_too_large",
+  ));
+});
+
+test("rejects a blob that is not a tlock payload at all", async () => {
+  const sealed = await sealFixture();
+  const codes = rejectionCodes(
+    { ...sealed, ciphertext: new TextEncoder().encode("age-encryption.org/v1\nnot armored\n") },
+    fixtureBinding(),
+  );
+  assert.ok(codes.includes("invalid_sealed_payload"));
+});
+
+// ── Length ────────────────────────────────────────────────────────────────
+
+test("rejects a commitment that is not 32 bytes", async () => {
+  const sealed = await sealFixture();
+  assert.deepEqual(
+    rejectionCodes({ ...sealed, commitment: sealed.commitment.slice(0, 31) }, fixtureBinding()),
+    ["invalid_commitment_length"],
+  );
+  assert.deepEqual(
+    rejectionCodes({ ...sealed, commitment: new Uint8Array(33) }, fixtureBinding()),
+    ["invalid_commitment_length"],
+  );
+});
+
+test("rejects a nonce that is not 32 bytes", async () => {
+  const sealed = await sealFixture();
+  assert.deepEqual(
+    rejectionCodes(sealed, fixtureBinding({ nonce: new Uint8Array(31) })),
+    ["invalid_nonce_length"],
+  );
+});
+
+test("rejects an oversized auditor blob", async () => {
+  const sealed = await sealFixture();
+  const codes = rejectionCodes(
+    { ...sealed, auditorBlob: new Uint8Array(MAX_AUDITOR_BLOB_BYTES + 1) },
+    fixtureBinding(),
+  );
+  assert.ok(codes.includes("blob_too_large"));
+});
+
+// ── A commitment that does not match the value is rejected ────────────────
+
+test("rejects a blob whose commitment does not match the value", async () => {
+  const sealed = await sealFixture();
+  // The caller believes they bid 1 more stroop than they sealed.
+  const codes = rejectionCodes(sealed, fixtureBinding({ value: BID_VALUE + 1n }));
+  assert.deepEqual(codes, ["commitment_mismatch"]);
+});
+
+test("rejects a blob whose commitment does not match the nonce", async () => {
+  const sealed = await sealFixture();
+  assert.deepEqual(
+    rejectionCodes(sealed, fixtureBinding({ nonce: new Uint8Array(32).fill(0x99) })),
+    ["commitment_mismatch"],
+  );
+});
+
+test("rejects a swapped blob: one bidder's ciphertext with another's commitment", async () => {
+  const aliceNonce = new Uint8Array(32).fill(1);
+  const bobNonce = new Uint8Array(32).fill(2);
+  const alice = await sealFixture({ value: 700n, nonce: aliceNonce });
+  const bob = await sealFixture({ value: 900n, nonce: bobNonce });
+  const swapped: SealedBid = { ...alice, commitment: bob.commitment };
+
+  // Alice's ciphertext is structurally perfect, so the encoding and length
+  // layers pass it. Only re-deriving the commitment from the value and nonce
+  // the caller actually sealed catches the substitution.
+  assert.equal(validateSealedBid(swapped).valid, true);
+  assert.deepEqual(
+    rejectionCodes(swapped, { value: 700n, nonce: aliceNonce, round: BID_ROUND }),
+    ["commitment_mismatch"],
+  );
+});
+
+test("documents the swap boundary: a self-consistent wrong binding is not detectable", async () => {
+  const aliceNonce = new Uint8Array(32).fill(1);
+  const bobNonce = new Uint8Array(32).fill(2);
+  const alice = await sealFixture({ value: 700n, nonce: aliceNonce });
+  const bob = await sealFixture({ value: 900n, nonce: bobNonce });
+  const swapped: SealedBid = { ...alice, commitment: bob.commitment };
+
+  // Honest limit of an offline gate. If the caller hands the gate bob's value
+  // and nonce, the commitment does match them, and the blob passes — because
+  // the only way to notice that alice's ciphertext is hiding something else is
+  // to decrypt it, and the seal is timelocked. This is not a gap the check can
+  // close; it is the guarantee the seal is built on. What the gate does
+  // guarantee is that a *self-consistent* value/nonce/commitment triple is what
+  // gets committed, so the reveal can only fail for the contract's own reasons.
+  assert.equal(
+    validateSealedBid(swapped, { value: 900n, nonce: bobNonce, round: BID_ROUND }).valid,
+    true,
+  );
+  // The caller's own inputs are the attack surface, so they are echoed nowhere
+  // even when the blob is rejected: the mismatch message names neither side.
+  const result = validateSealedBid(swapped, { value: 1n, nonce: aliceNonce, round: BID_ROUND });
+  assert.equal(result.valid, false);
+  assert.ok(!result.issues.some((i) => i.message.includes("700")));
+  assert.ok(!result.issues.some((i) => i.message.includes("900")));
+});
+
+test("rejects another round's commitment substituted for this bid's", async () => {
+  const mine = await sealFixture({ value: 700n, nonce: new Uint8Array(32).fill(1) });
+  const other = await sealFixture({ value: 700n, nonce: new Uint8Array(32).fill(1), round: BID_ROUND + 1 });
+  // Same value and nonce, so only the round differs — the commitment is equal.
+  assert.deepEqual([...mine.commitment], [...other.commitment]);
+  assert.deepEqual(
+    rejectionCodes({ ...mine, commitment: other.commitment.slice().reverse() }, {
+      value: 700n,
+      nonce: new Uint8Array(32).fill(1),
+      round: BID_ROUND,
+    }),
+    ["commitment_mismatch"],
+  );
+});
+
+// ── Cross-round blobs are rejected ────────────────────────────────────────
+
+test("rejects a blob sealed to a different drand round", async () => {
+  const sealed = await sealFixture();
+  assert.deepEqual(rejectionCodes(sealed, fixtureBinding({ round: BID_ROUND + 1 })), [
+    "round_mismatch",
+  ]);
+  assert.deepEqual(rejectionCodes(sealed, fixtureBinding({ round: 1 })), ["round_mismatch"]);
+});
+
+test("rejects a blob bound to a different drand chain", async () => {
+  const sealed = await sealFixture();
+  assert.deepEqual(rejectionCodes(sealed, fixtureBinding({ chainHash: "a".repeat(64) })), [
+    "chain_mismatch",
+  ]);
+  // The contract verifies quicknet, so quicknet is the default expectation.
+  assert.equal(validateSealedBid(sealed, fixtureBinding({ chainHash: QUICKNET_HASH })).valid, true);
+});
+
+// ── The bid value never reaches the error ─────────────────────────────────
+
+test("the error text does not contain the fixture bid", async () => {
+  const sealed = await sealFixture();
+
+  // Every rejection path is exercised, and none of them may echo the value.
+  const rejected: Array<{ sealed: SealedBid; binding?: SealedBidBinding }> = [
+    { sealed, binding: fixtureBinding({ value: BID_VALUE + 1n }) },
+    { sealed, binding: fixtureBinding({ nonce: new Uint8Array(32).fill(0x99) }) },
+    { sealed, binding: fixtureBinding({ nonce: new Uint8Array(31) }) },
+    { sealed, binding: fixtureBinding({ round: BID_ROUND + 1 }) },
+    { sealed, binding: fixtureBinding({ chainHash: "a".repeat(64) }) },
+    { sealed: { ...sealed, ciphertext: sealed.ciphertext.slice(0, 120) }, binding: fixtureBinding() },
+    { sealed: { ...sealed, commitment: sealed.commitment.slice(0, 31) }, binding: fixtureBinding() },
+  ];
+
+  for (const { sealed: bad, binding } of rejected) {
+    const result = validateSealedBid(bad, binding);
+    assert.equal(result.valid, false, "expected rejection");
+    for (const issue of result.issues) {
+      assert.ok(
+        !issue.message.includes(BID_VALUE.toString()),
+        `message leaked the bid: ${issue.message}`,
+      );
+      assert.ok(
+        !issue.message.includes(BID_VALUE.toString(16)),
+        `message leaked the bid in hex: ${issue.message}`,
+      );
+    }
+  }
+});
+
+test("assertSealedBid throws a typed error whose message omits the bid", async () => {
+  const sealed = await sealFixture();
+  assert.throws(
+    () => assertSealedBid(sealed, fixtureBinding({ value: BID_VALUE + 1n })),
+    (error: unknown) => {
+      assert.ok(error instanceof SubRosaClientConfigError);
+      assert.match(error.message, /commitment does not match/);
+      assert.ok(!error.message.includes(BID_VALUE.toString()));
+      return true;
+    },
+  );
+});
+
+test("assertSealedBid reports every defect at once", async () => {
+  const sealed = await sealFixture();
+  const codes = (() => {
+    try {
+      assertSealedBid(
+        { ...sealed, ciphertext: sealed.ciphertext.slice(0, 120) },
+        fixtureBinding({ value: BID_VALUE + 1n }),
+      );
+      return [];
+    } catch (error) {
+      assert.ok(error instanceof SubRosaClientConfigError);
+      return error.message.split("; ");
+    }
+  })();
+  assert.ok(codes.length >= 2, "expected both the payload and the binding defect");
+});
+
+// ── The gate agrees with tlock's own helper ───────────────────────────────
+
+test("the accepted set is exactly the set tlock's commitment helper agrees with", async () => {
+  const sealed = await sealFixture();
+  // The gate must not be a second, drifting definition of "this is the bid":
+  // it has to accept precisely when tlock derives the same H.
+  for (const value of [BID_VALUE - 1n, BID_VALUE, BID_VALUE + 1n]) {
+    const agrees = bytesEqual(sealed.commitment, commitment(value, BID_NONCE));
+    const accepted = validateSealedBid(sealed, fixtureBinding({ value })).valid;
+    assert.equal(accepted, agrees, `value ${value}: accepted=${accepted} agrees=${agrees}`);
+  }
+});
+
+function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
+  if (a.length !== b.length) return false;
+  return a.every((byte, i) => byte === b[i]);
+}
 
 test("forced hex does not fall back to base64", () => {
   const result = validateEncryptedBlob("/w==", "ciphertext", { encoding: "hex" });

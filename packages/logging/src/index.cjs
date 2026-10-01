@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-'use strict';
+'strict';
 
 const { collectSecrets, scrubText, serialize } = require('./serialization.cjs');
 

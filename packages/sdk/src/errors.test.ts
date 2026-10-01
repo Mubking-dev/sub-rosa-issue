@@ -1,10 +1,19 @@
 // Copyright (c) 2026 Sub Rosa contributors
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { resolve, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   SDK_ERROR_CODES,
   sdkErrorCode,
+  ROUND_CONTRACT_ERRORS,
+  ROUND_CONTRACT_ERRORS_BY_NAME,
+  getRoundContractError,
+  isRoundContractErrorRetryable,
+  diffContractErrorMapping,
   SubRosaClientConfigError,
+  SubRosaPreflightError,
   SubRosaSubmitError,
   SubRosaTransactionError,
   SubRosaMissingReturnValueError,
@@ -13,8 +22,13 @@ import {
   SubRosaTimeoutError,
 } from "./errors.js";
 import { StatusApiError, StatusJsonParseError } from "./status-client.js";
+import { Errors as RoundBindingsErrors } from "@sub-rosa/round-bindings";
 import { SubRosaClient } from "./client.js";
 import { createFakeTime } from "@sub-rosa/time";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+const REPO_ROOT = resolve(__dirname, "../../../");
 
 describe("SubRosaClientConfigError", () => {
   it("sets name and message", () => {
@@ -139,7 +153,7 @@ describe("SubRosaTimeoutError", () => {
 const BASE_CONFIG = {
   rpcUrl: "https://example.com",
   networkPassphrase: "Test SDF Network ; September 2015",
-  contractId: "CCW67TSA3JH6KABMZAWOS6J2GKY6BKBJ5TKQAMM6P3EXZ7OAFM2TJ5BQ",
+  contractId: "CDAZ5AJPVCJ6R3BQUPYISBSWV77HZ52T7YFWZGTVEEEFW5FVHZAK2JIM",
 };
 
 describe("SubRosaClientConfig validation", () => {
@@ -329,3 +343,294 @@ describe("sdkErrorCode", () => {
     assert.equal(sdkErrorCode({ code: "STATUS_API_ERROR" }), "UNKNOWN");
   });
 });
+// -------------------------------------------------------------------------
+// Round contract error mapping & retryable classification
+// -------------------------------------------------------------------------
+
+function parseErrorsMdContent(content: string) {
+  const variants: { name: string; code: number }[] = [];
+  const re = /^\|\s*(\d+)\s*\|\s*`(\w+)`\s*\|/gm;
+  let match: RegExpExecArray | null;
+  while ((match = re.exec(content)) !== null) {
+    variants.push({ name: match[2], code: Number(match[1]) });
+  }
+  return variants;
+}
+
+function parseTypesRsContent(content: string) {
+  const enumMatch = content.match(
+    /#\[contracterror\][\s\S]*?pub enum Error \{([\s\S]*?)\n\}/,
+  );
+  if (!enumMatch) {
+    throw new Error("Could not find `pub enum Error` in types.rs");
+  }
+  const variants: { name: string; code: number }[] = [];
+  for (const line of enumMatch[1].split("\n")) {
+    const match = line.match(/^\s+(\w+)\s*=\s*(\d+),?\s*(?:\/\/.*)?$/);
+    if (match) {
+      variants.push({ name: match[1], code: Number(match[2]) });
+    }
+  }
+  return variants;
+}
+
+function parseErrorPathsRsRegistry(content: string) {
+  const regMatch = content.match(
+    /const ERROR_PATH_REGISTRY:\s*&\[\(Error,\s*&'static str\)\]\s*=\s*&\[([\s\S]*?)\];/,
+  );
+  if (!regMatch) {
+    throw new Error("Could not find ERROR_PATH_REGISTRY in error_paths.rs");
+  }
+  const variants: string[] = [];
+  for (const line of regMatch[1].split("\n")) {
+    const match = line.match(/Error::(\w+)/);
+    if (match) {
+      variants.push(match[1]);
+    }
+  }
+  return variants;
+}
+
+describe("ROUND_CONTRACT_ERRORS mapping coverage", () => {
+  it("covers every error variant in contracts/round/ERRORS.md", () => {
+    const errorsMdPath = resolve(REPO_ROOT, "contracts/round/ERRORS.md");
+    const content = readFileSync(errorsMdPath, "utf-8");
+    const docErrors = parseErrorsMdContent(content);
+
+    assert.ok(docErrors.length >= 27, "ERRORS.md must contain at least 27 error rows");
+    const failures = diffContractErrorMapping(docErrors);
+    assert.deepEqual(failures, [], "Every documented contract error must match ROUND_CONTRACT_ERRORS");
+  });
+
+  it("covers every error variant in contracts/round/src/types.rs", () => {
+    const typesRsPath = resolve(REPO_ROOT, "contracts/round/src/types.rs");
+    const content = readFileSync(typesRsPath, "utf-8");
+    const typesErrors = parseTypesRsContent(content);
+
+    assert.ok(typesErrors.length >= 27, "types.rs must contain at least 27 error variants");
+    const failures = diffContractErrorMapping(typesErrors);
+    assert.deepEqual(failures, [], "types.rs enum Error must match ROUND_CONTRACT_ERRORS");
+  });
+
+  it("covers every variant tested in contracts/round/src/error_paths.rs", () => {
+    const errorPathsPath = resolve(REPO_ROOT, "contracts/round/src/error_paths.rs");
+    const content = readFileSync(errorPathsPath, "utf-8");
+    const registryVariants = parseErrorPathsRsRegistry(content);
+
+    assert.ok(
+      registryVariants.length >= 27,
+      "ERROR_PATH_REGISTRY must contain at least 27 error variants",
+    );
+    for (const name of registryVariants) {
+      const mapped = ROUND_CONTRACT_ERRORS_BY_NAME[name];
+      assert.ok(
+        mapped !== undefined,
+        `Variant '${name}' from error_paths.rs must exist in ROUND_CONTRACT_ERRORS_BY_NAME`,
+      );
+    }
+  });
+
+  it("covers every error in generated @sub-rosa/round-bindings", () => {
+    const bindingEntries = Object.entries(RoundBindingsErrors).map(
+      ([codeStr, info]) => ({
+        code: Number(codeStr),
+        name: info.message,
+      }),
+    );
+    const failures = diffContractErrorMapping(bindingEntries);
+    assert.deepEqual(failures, [], "Generated bindings must match SDK error mapping");
+  });
+
+  it("fails when a fixture error without a mapping is present", () => {
+    const fixtureWithUnmapped = [
+      ...Object.values(ROUND_CONTRACT_ERRORS).map((e) => ({
+        code: e.code,
+        name: e.name,
+      })),
+      { code: 99, name: "UnmappedContractError" },
+    ];
+    const failures = diffContractErrorMapping(fixtureWithUnmapped);
+    assert.equal(failures.length, 1);
+    assert.match(failures[0], /UnmappedContractError/);
+    assert.match(failures[0], /not mapped/);
+  });
+
+  it("fails when a mapped SDK error is missing from the contract list", () => {
+    const incompleteList = Object.values(ROUND_CONTRACT_ERRORS)
+      .filter((e) => e.name !== "NotInitialized")
+      .map((e) => ({ code: e.code, name: e.name }));
+    const failures = diffContractErrorMapping(incompleteList);
+    assert.equal(failures.length, 1);
+    assert.match(failures[0], /NotInitialized/);
+    assert.match(failures[0], /missing from contract errors list/);
+  });
+});
+
+describe("isRoundContractErrorRetryable classification", () => {
+  it("marks transient and lifecycle timing conditions as retryable", () => {
+    const retryableErrors = [
+      "CommitNotClosed",
+      "RevealNotOpen",
+      "RevealStillOpen",
+      "NotCleared",
+      "NotVoidable",
+    ];
+
+    for (const name of retryableErrors) {
+      const spec = getRoundContractError(name);
+      assert.ok(spec, `Expected spec for ${name}`);
+      assert.equal(
+        spec.retryable,
+        true,
+        `${name} (#${spec.code}) must be marked retryable: true`,
+      );
+      assert.equal(
+        isRoundContractErrorRetryable(name),
+        true,
+        `isRoundContractErrorRetryable('${name}') must return true`,
+      );
+      assert.equal(
+        isRoundContractErrorRetryable(spec.code),
+        true,
+        `isRoundContractErrorRetryable(${spec.code}) must return true`,
+      );
+    }
+  });
+
+  it("marks permanent contract failures as non-retryable", () => {
+    const permanentErrors = [
+      "NotInitialized",
+      "AlreadyInitialized",
+      "RoundNotFound",
+      "BidNotFound",
+      "CommitClosed",
+      "CommitDeadlineAfterReveal",
+      "RevealAlreadyOpen",
+      "RevealWindowClosed",
+      "AlreadyCleared",
+      "AlreadySettled",
+      "RoundVoided",
+      "WrongStatus",
+      "InvalidDrandSignature",
+      "HashMismatch",
+      "AlreadyRevealed",
+      "PayloadTooLarge",
+      "InvalidAmount",
+      "BidExceedsEscrow",
+      "DeadlineInPast",
+      "NoValidBids",
+      "RoundFull",
+      "InvalidLimit",
+    ];
+
+    for (const name of permanentErrors) {
+      const spec = getRoundContractError(name);
+      assert.ok(spec, `Expected spec for ${name}`);
+      assert.equal(
+        spec.retryable,
+        false,
+        `${name} (#${spec.code}) must be marked non-retryable: false`,
+      );
+      assert.equal(
+        isRoundContractErrorRetryable(name),
+        false,
+        `isRoundContractErrorRetryable('${name}') must return false`,
+      );
+      assert.equal(
+        isRoundContractErrorRetryable(spec.code),
+        false,
+        `isRoundContractErrorRetryable(${spec.code}) must return false`,
+      );
+    }
+  });
+
+  it("treats unknown errors as non-retryable", () => {
+    assert.equal(isRoundContractErrorRetryable("UnknownTrap"), false);
+    assert.equal(isRoundContractErrorRetryable(999), false);
+    assert.equal(isRoundContractErrorRetryable(0), false);
+    assert.equal(isRoundContractErrorRetryable(undefined), false);
+    assert.equal(isRoundContractErrorRetryable(null), false);
+    assert.equal(getRoundContractError("UnknownTrap"), undefined);
+    assert.equal(getRoundContractError(999), undefined);
+  });
+});
+
+describe("SubRosaPreflightError with contract error retryable integration", () => {
+  it("automatically infers retryable: true for retryable contract error codes and messages", () => {
+    const errByCode = new SubRosaPreflightError({
+      kind: "contract_error",
+      operation: "settle",
+      message: "Contract rejected call: NotCleared",
+      contractErrorCode: 17,
+      contractErrorMessage: "NotCleared",
+    });
+    assert.equal(errByCode.retryable, true);
+
+    const errByNameOnly = new SubRosaPreflightError({
+      kind: "contract_error",
+      operation: "clear",
+      message: "Contract rejected call: RevealStillOpen",
+      contractErrorMessage: "RevealStillOpen",
+    });
+    assert.equal(errByNameOnly.retryable, true);
+  });
+
+  it("automatically infers retryable: false for permanent contract errors", () => {
+    const errSettled = new SubRosaPreflightError({
+      kind: "contract_error",
+      operation: "settle",
+      message: "Contract rejected call: AlreadySettled",
+      contractErrorCode: 19,
+      contractErrorMessage: "AlreadySettled",
+    });
+    assert.equal(errSettled.retryable, false);
+
+    const errHashMismatch = new SubRosaPreflightError({
+      kind: "contract_error",
+      operation: "reveal",
+      message: "Contract rejected call: HashMismatch",
+      contractErrorCode: 31,
+      contractErrorMessage: "HashMismatch",
+    });
+    assert.equal(errHashMismatch.retryable, false);
+  });
+
+  it("defaults unknown contract errors and other preflight kinds to retryable: false", () => {
+    const unknownContractErr = new SubRosaPreflightError({
+      kind: "contract_error",
+      operation: "commit",
+      message: "Contract rejected call: CustomUnknownTrap",
+      contractErrorCode: 888,
+      contractErrorMessage: "CustomUnknownTrap",
+    });
+    assert.equal(unknownContractErr.retryable, false);
+
+    const simErr = new SubRosaPreflightError({
+      kind: "simulation_error",
+      operation: "commit",
+      message: "Simulation failed",
+    });
+    assert.equal(simErr.retryable, false);
+  });
+
+  it("respects explicit retryable overrides when supplied", () => {
+    const overrideTrue = new SubRosaPreflightError({
+      kind: "simulation_error",
+      operation: "commit",
+      message: "Transient simulation failure",
+      retryable: true,
+    });
+    assert.equal(overrideTrue.retryable, true);
+
+    const overrideFalse = new SubRosaPreflightError({
+      kind: "contract_error",
+      operation: "settle",
+      message: "Contract rejected call: NotCleared",
+      contractErrorCode: 17,
+      contractErrorMessage: "NotCleared",
+      retryable: false,
+    });
+    assert.equal(overrideFalse.retryable, false);
+  });
+});
+

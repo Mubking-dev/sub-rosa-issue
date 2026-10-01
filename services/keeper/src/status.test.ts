@@ -9,6 +9,7 @@ import {
   checkHealth,
   type BuildStatusSource,
 } from "./status.js";
+import type { GuardSkipRecord } from "./settlement-guard.js";
 import type { WatchedRound } from "./store.js";
 
 const TEST_NOW_SECONDS = createFakeTime(1_700_000_000_000).clock.nowSeconds();
@@ -261,6 +262,59 @@ describe("buildRoundStatus — settled round", () => {
     assert.equal(r.winner, "GDDD");
     assert.equal(r.winningValue, "100");
     assert.equal(r.lastKeeperAction, "settled");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Settlement guard refusal (Issue #385)
+// ---------------------------------------------------------------------------
+
+describe("buildRoundStatus — settlement guard refusal", () => {
+  it("surfaces the typed reason the guard refused to submit", async () => {
+    const now = TEST_NOW_SECONDS;
+    const skip: GuardSkipRecord = {
+      action: "settle",
+      reason: "refund_missing",
+      detail: "escrow for GBBB is unreadable; its refund cannot be verified",
+      at: "2026-09-30T00:00:00.000Z",
+    };
+    const source = makeSource({
+      reader: readerOk({
+        status: "Cleared",
+        revealRound: 1,
+        commitDeadline: now - 7200,
+        revealDeadline: now - 3600,
+        bidders: ["GAAA", "GBBB"],
+        winner: "GAAA",
+        winningBid: 700n,
+      }),
+      storeRounds: () => [
+        { roundId: "4", lastStatus: "Cleared", retryCount: 0 },
+      ] as WatchedRound[],
+      settleIndicator: () => "pending",
+      guardSkip: (roundId) => (roundId === 4n ? skip : null),
+    });
+
+    const res = await buildKeeperStatus(source);
+    const r = res.rounds[0];
+    assert.deepEqual(r.guardSkip, skip, "the full refusal record is served");
+    assert.equal(
+      r.guardSkipIndicator,
+      "settle refused: refund_missing",
+      "the compact indicator names the action and the typed reason",
+    );
+  });
+
+  it("reports no refusal when the guard let the submission through", async () => {
+    const source = makeSource({
+      storeRounds: () => [
+        { roundId: "5", lastStatus: "Cleared", retryCount: 0 },
+      ] as WatchedRound[],
+      guardSkip: () => null,
+    });
+    const res = await buildKeeperStatus(source);
+    assert.equal(res.rounds[0].guardSkip, null);
+    assert.equal(res.rounds[0].guardSkipIndicator, null);
   });
 });
 

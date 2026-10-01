@@ -2,21 +2,17 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { QUICKNET_HASH } from "./quicknet.js";
+import { QUICKNET_HASH, assertQuicknetFixture } from "./quicknet.js";
 import { classifyDrandRound } from "./freshness.js";
 
-const QUICKNET_FIXTURE = {
-  public_key:
-    "83cf0f2896adee7eb8b5f01fcad3912212c437e0073e911fb90022d3e760183c8c4b450b6a0a6c3ac6a5776a2d1064510d1fec758c921cc22b0e17e63aaf4bcb5ed66304de9cf809bd274ca73bab4af5a6e9c76a4bc09e76eae8991ef5ece45a",
-  period: 3,
-  genesis_time: 1692803367,
-  hash: "52db9ba70e0cc0f6eaf7803dd07447a1f5477735fd3f661792ba94600c84e971",
-  groupHash: "f477d5c89f21a17c863a7f937c6a6d15859414d2be09cd448d4279af331c5d3e",
-  schemeID: "bls-unchained-g1-rfc9380",
-  metadata: {
-    beaconID: "quicknet",
-  },
-};
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const vectorPath = path.resolve(__dirname, "../../../test-vectors/quicknet.json");
+const vectors = JSON.parse(fs.readFileSync(vectorPath, "utf-8"));
+const QUICKNET_FIXTURE = vectors[0];
 
 test("QUICKNET_HASH matches the frozen quicknet fixture", () => {
   assert.equal(QUICKNET_HASH, QUICKNET_FIXTURE.hash);
@@ -90,4 +86,9 @@ test("freshness helper uses fixture fields to compute round timing", () => {
   const after = classifyDrandRound(round, { genesis_time, period }, publishAtMs + 60_001);
   assert.equal(after.status, "stale");
   assert.ok(after.ageMs! >= 60_001);
+});
+
+test("a mutated period fails the fixture comparison", () => {
+  const mutated = { ...QUICKNET_FIXTURE, period: 4 };
+  assert.throws(() => assertQuicknetFixture(mutated), /period mismatch/);
 });

@@ -3,6 +3,7 @@ import { normalizeError, publicErrorMessage } from "@sub-rosa/logging/errors";
 import { Buffer } from "buffer";
 import {
   getAddress,
+  getNetworkDetails,
   signAuthEntry,
   signTransaction,
 } from "@stellar/freighter-api";
@@ -10,16 +11,16 @@ import { RoundContract } from "@sub-rosa/sdk";
 import { useMemo } from "react";
 
 import { formatEscrowAmount } from "./amount";
+import { configuredNetworkPassphrase, publicEnv } from "./config";
+
+const env = publicEnv();
 
 export const LOGO_SRC = "/sub-rosa-logo.png";
-export const RPC_URL = import.meta.env.VITE_RPC_URL ?? "https://soroban-testnet.stellar.org";
-export const NETWORK =
-  import.meta.env.VITE_NETWORK_PASSPHRASE ?? "Test SDF Network ; September 2015";
-export const CONTRACT_ID = import.meta.env.VITE_CONTRACT_ID;
-export const ESCROW_TOKEN_LABEL = import.meta.env.VITE_ESCROW_TOKEN_LABEL ?? "token";
-export const DEFAULT_ROUND_ID = import.meta.env.VITE_ROUND_ID
-  ? BigInt(import.meta.env.VITE_ROUND_ID)
-  : null;
+export const RPC_URL = env.VITE_RPC_URL ?? "https://soroban-testnet.stellar.org";
+export const NETWORK = configuredNetworkPassphrase(env);
+export const CONTRACT_ID = env.VITE_CONTRACT_ID;
+export const ESCROW_TOKEN_LABEL = env.VITE_ESCROW_TOKEN_LABEL ?? "token";
+export const DEFAULT_ROUND_ID = env.VITE_ROUND_ID ? BigInt(env.VITE_ROUND_ID) : null;
 
 /** Seconds between commit deadline and Drand round R (the “Wait for Drand R” UI phase). */
 export const LIVE_COMMIT_CLOSE_BEFORE_REVEAL_SECONDS = 10;
@@ -50,7 +51,11 @@ export function freighterError(result: { error?: unknown }) {
 }
 
 export function displayError(error: unknown): string {
-  const message = normalizeError(error).message;
+  const normalized = normalizeError(error);
+  // Network-mismatch errors are safe and actionable: surface both network
+  // labels verbatim instead of the generic public message.
+  if (normalized.name === "DemoNetworkMismatchError") return normalized.message;
+  const message = normalized.message;
   if (message.includes("Contract, #10")) {
     return "Commit window closed. Create a fresh round, then commit before Drand reaches reveal.";
   }
@@ -118,6 +123,29 @@ export function useWalletContract(address: string | null) {
       },
     });
   }, [address]);
+}
+
+/**
+ * Passphrase the SDK client (or `null` before the wallet connects) is bound
+ * to. Contract StrKeys do not encode a network, so this is the app's SDK-side
+ * source of truth for the demo's target network.
+ */
+export function sdkClientNetworkPassphrase(
+  client: RoundContract | null | undefined,
+): string {
+  return client?.options?.networkPassphrase ?? "";
+}
+
+/**
+ * Read the passphrase the connected wallet/chain currently reports. A wallet
+ * switch can change this independently of the SDK client, so it must be read
+ * immediately before each state-changing action.
+ */
+export async function detectChainNetworkPassphrase(): Promise<string> {
+  const details = await getNetworkDetails();
+  const error = freighterError(details);
+  if (error) throw new Error(error);
+  return details.networkPassphrase;
 }
 
 export async function resolveFreighterAddress(

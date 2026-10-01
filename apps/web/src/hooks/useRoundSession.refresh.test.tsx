@@ -20,16 +20,19 @@ function deferred<T>() {
   return { promise, resolve };
 }
 const contract = {
+  options: { contractId: "contract", networkPassphrase: "test" },
   get_round: async ({ round_id }: { round_id: bigint }) => wrapped(await reader(round_id)),
   get_bidders: async ({ round_id }: { round_id: bigint }) => wrapped([`bidder-${round_id}`]),
   get_bid_state: async () => wrapped({ revealed_value: null }),
   create_round: async () => ({ signAndSend: async () => wrapped(9n) }),
 };
 mock.module(new URL("../lib/chain.ts", import.meta.url).href, { namedExports: {
-  CONTRACT_ID: "contract", NETWORK: "test", LIVE_COMMIT_CLOSE_BEFORE_REVEAL_SECONDS: 10,
+  CONTRACT_ID: "contract", NETWORK: "test",
+  PUBLIC_ENV: { VITE_CONTRACT_ID: "contract", VITE_NETWORK_PASSPHRASE: "test" }, LIVE_COMMIT_CLOSE_BEFORE_REVEAL_SECONDS: 10,
   LIVE_COMMIT_WINDOW_SECONDS: 27, LIVE_REVEAL_IN_SECONDS: 37, LIVE_REVEAL_WINDOW_AFTER_REVEAL_SECONDS: 240,
   useWalletContract: () => contract, displayError: (e: Error) => e.message,
   formatDemoAmount: String, freighterError: () => null, resolveFreighterAddress: async () => wallet,
+  detectChainNetworkPassphrase: async () => "test", sdkClientNetworkPassphrase: () => "test",
   sha256Bytes: async () => new Uint8Array(32), toDemoEscrowAmount: BigInt,
 } });
 mock.module(new URL("../ui/Toast.tsx", import.meta.url).href, { namedExports: { useToast: () => ({ push: () => "toast", dismiss: () => {} }) } });

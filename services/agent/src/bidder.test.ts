@@ -76,7 +76,7 @@ function bidderFixture() {
       calls.sealed++; duringSeal();
       assert.equal(revealRound, 123);
       assert.deepEqual(auditorPublicKey, new Uint8Array(round.auditor_pubkey));
-      return { commitment: new Uint8Array(32), ciphertext: new Uint8Array(4), auditorBlob: new Uint8Array(4) };
+      return { commitment: new Uint8Array(32), ciphertext: new Uint8Array(4), auditorBlob: new Uint8Array(4), sealRound: 123 };
     },
   };
   return { config, round, calls, deps, clock,
@@ -127,4 +127,33 @@ test("matching inputs within the window retain successful bidder flow", async ()
   assert.deepEqual(f.calls, { paid: 1, sealed: 1, committed: 1 });
   assert.equal(result.bidder, f.config.mandate.sessionKey);
   assert.equal(result.bidValue, usdcToStroops(50));
+});
+
+test("commit status reports pending then committed only after the SDK commit resolves", async () => {
+  const f = bidderFixture();
+  const seen: string[] = [];
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const base = f.deps.createClient;
+  f.deps.createClient = (o) => ({ ...base(o), commit: async () => { await gate; f.calls.committed++; } });
+  f.config.onCommitStatus = (o) => seen.push(o.status);
+  const running = runBidderAgent(f.config, f.deps);
+  await new Promise((r) => setImmediate(r));
+  assert.deepEqual(seen, ["pending"]);
+  release();
+  const result = await running;
+  assert.deepEqual(seen, ["pending", "committed"]);
+  assert.deepEqual(result.commit, { status: "committed", bidder: f.config.mandate.sessionKey });
+});
+
+test("SDK commit failure reports failed with the SDK error code and never committed", async () => {
+  const f = bidderFixture();
+  const seen: Array<{ status: string; code?: string }> = [];
+  const base = f.deps.createClient;
+  f.deps.createClient = (o) => ({ ...base(o), commit: async () => {
+    throw Object.assign(new Error("contract rejected"), { name: "SubRosaPreflightError", contractErrorCode: 7 });
+  } });
+  f.config.onCommitStatus = (o) => seen.push({ status: o.status, ...(o.status === "failed" ? { code: o.code } : {}) });
+  await assert.rejects(runBidderAgent(f.config, f.deps), /contract rejected/);
+  assert.deepEqual(seen, [{ status: "pending" }, { status: "failed", code: "SubRosaPreflightError#7" }]);
 });

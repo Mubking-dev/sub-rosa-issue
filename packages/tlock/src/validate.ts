@@ -9,8 +9,7 @@
 // response up-front with an explicit, actionable message.
 
 import { isValidHex } from "./commitment.js";
-
-/** Bound the range of sane values for a quicknet-scale chain. */
+import { StrKey } from "@stellar/stellar-sdk";
 const MIN_PERIOD = 1;
 const MAX_PERIOD = 1000;
 const MIN_GENESIS_TIME = 1_000_000_000; // after Sept 2001
@@ -131,5 +130,29 @@ export function assertBeacon(beacon: unknown): void {
 
   if (!isNonEmptyString(b.signature) || !isValidHex(b.signature)) {
     beaconFail("signature", "must be a non-empty hex string");
+  }
+}
+
+/**
+ * Validate a Stellar contract ID strkey.
+ */
+export function assertContractId(value: unknown): void {
+  if (typeof value !== "string" || value.trim().length === 0) {
+    throw new Error("malformed contractId: must be a non-empty string");
+  }
+  if (!StrKey.isValidContract(value.trim().toUpperCase())) {
+    throw new Error("malformed contractId: must be a valid Soroban contract id");
+  }
+}
+
+/**
+ * Validate a Stellar bidder ID strkey (Ed25519 public key).
+ */
+export function assertBidderId(value: unknown): void {
+  if (typeof value !== "string" || value.trim().length === 0) {
+    throw new Error("malformed bidderId: must be a non-empty string");
+  }
+  if (!StrKey.isValidEd25519PublicKey(value.trim().toUpperCase())) {
+    throw new Error("malformed bidderId: must be a valid Stellar account id");
   }
 }

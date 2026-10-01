@@ -1,7 +1,5 @@
-import { publicErrorMessage } from "@sub-rosa/logging/errors";
 // Copyright (c) 2026 Sub Rosa contributors
 import { useEffect, useState } from "react";
-import { quicknet } from "@sub-rosa/tlock";
 import { useTime } from "../lib/time";
 
 import { localCountdown, type DrandCountdown } from "../lib/countdown";
@@ -12,50 +10,24 @@ export function useDrandCountdown(targetRound: number, pollMs = 1000): DrandCoun
   const [state, setState] = useState<DrandCountdown>(() => ({
     loading: false,
     error: null,
-    ...localCountdown(targetRound, clock.nowSeconds()),
+    ...localCountdown(targetRound, clock.nowMs()),
   }));
 
   useEffect(() => {
     let cancelled = false;
-    const client = quicknet();
 
-    async function tick() {
-      const fallback = localCountdown(targetRound, clock.nowSeconds());
-
-      try {
-        const info = await client.chain().info();
-        const genesis = info.genesis_time;
-        const period = info.period;
-        const now = clock.nowSeconds();
-        const currentRound = Math.floor((now - genesis) / period);
-        const targetTime = genesis + period * targetRound;
-        const published = currentRound >= targetRound;
-        const secondsRemaining = published ? 0 : Math.max(0, targetTime - now);
-
-        if (!cancelled) {
-          setState({
-            loading: false,
-            error: null,
-            currentRound,
-            targetRound,
-            secondsRemaining,
-            targetTime,
-            published,
-          });
-        }
-      } catch (e) {
-        if (!cancelled) {
-          setState({
-            ...fallback,
-            loading: false,
-            error: publicErrorMessage(e),
-          });
-        }
-      }
+    function tick() {
+      if (cancelled) return;
+      const countdown = localCountdown(targetRound, clock.nowMs());
+      setState({
+        loading: false,
+        error: null,
+        ...countdown,
+      });
     }
 
-    void tick();
-    const handle = scheduler.setInterval(() => void tick(), pollMs);
+    tick();
+    const handle = scheduler.setInterval(tick, pollMs);
     return () => {
       cancelled = true;
       scheduler.clear(handle);

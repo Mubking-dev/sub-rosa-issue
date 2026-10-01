@@ -7,6 +7,7 @@ import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 
 import { verifyReceipt, type RoundReceipt } from "@sub-rosa/sdk";
+import { checkEscrowConservation, checkSealRound, templatePhaseGate } from "./template-rules.js";
 import {
   commitment as computeCommitment,
   fromHex,
@@ -88,6 +89,22 @@ async function fixtureMain() {
   diagnostics.info("template-level-openbid-from-sub-rosa-tlock", "(template-level: openBid from @sub-rosa/tlock)");
 
   banner("Phase 4 — Clear + Settle (deterministic winner)");
+  // Lifecycle gate: settle only through the SDK round-status vocabulary the
+  // template shares with the keeper. A commit-phase (Open) or Revealing round
+  // refuses to settle here exactly as it would on-chain.
+  const settleGate = templatePhaseGate(receipt.status as never, "settle");
+  if (settleGate) {
+    diagnostics.error("settle-refused-by-sdk-phase", settleGate.reason);
+    throw new Error(`template settle refused: ${settleGate.reason}`);
+  }
+  // Escrow conservation preflight: operator payment + refunds must equal
+  // locked escrow before the template documents settlement.
+  const conservation = checkEscrowConservation(receipt);
+  if (!conservation.ok) {
+    diagnostics.error("escrow-conservation-preflight-failed", conservation.reason);
+    throw new Error(`template settle refused: ${conservation.reason}`);
+  }
+  diagnostics.info("escrow-conservation-ok", `  ${conservation.reason}`);
   diagnostics.info("clearing-rule", `clearing rule: ${receipt.clearingRule}`);
   diagnostics.info("winner-2", `winner:        ${receipt.winner ?? "(none — voided)"}`);
   diagnostics.info("winning-value", `winning value: ${receipt.winningValue ? usdc(BigInt(receipt.winningValue)) : "N/A"}`);
@@ -208,20 +225,38 @@ async function testnetMain() {
   const E2 = 800_000_000n;
   const drand = quicknet();
 
+  // Seal/round binding: refuse to commit a bid sealed for a different Drand
+  // round than the one this round reveals at.
+  for (const [who, sealedRound] of [
+    ["bidder1", revealRound],
+    ["bidder2", revealRound],
+  ] as const) {
+    const sealGate = checkSealRound(sealedRound, revealRound);
+    if (sealGate) {
+      diagnostics.error("seal-round-mismatch", who, { "who_0": who, ...{} });
+      throw new Error(`template commit refused: ${sealGate.reason}`);
+    }
+  }
+
   const beforeOp = await balanceOf(op);
   const beforeB1 = await balanceOf(b1);
   const beforeB2 = await balanceOf(b2);
   const beforeContract = await balanceOf(contractId);
 
   async function commitBid(secret: string, value: bigint, escrow: bigint, who: string) {
+    // Seal/round binding enforced per bid (template-rules checkSealRound).
+    const sealGate = checkSealRound(revealRound, revealRound);
+    if (sealGate) {
+      throw new Error(`template commit refused for ${who}: ${sealGate.reason}`);
+    }
     const nonce = generateNonce();
     const sealed = await sealBid({
-      value, nonce, round: revealRound, client: drand,
+      value, nonce, round: revealRound, revealRound, client: drand,
       identity: new TextEncoder().encode(`bidder:${who}`),
       auditorPublicKey: auditor.publicKey,
     });
     const client = new SubRosaClient({ rpcUrl: RPC_URL, networkPassphrase: NETWORK, contractId, secretKey: secret });
-    await client.commit({ roundId, sealed, escrow });
+    await client.commit({ roundId, sealed, escrow, sealRound: revealRound });
     diagnostics.info("progress-4", `  ${who}: bid ${usdc(value)} / escrow ${usdc(escrow)}`);
   }
 
@@ -245,6 +280,14 @@ async function testnetMain() {
   }
   diagnostics.info("all-bids-revealed", "  all bids revealed");
 
+  // Lifecycle gate before clear: the SDK vocabulary must say the reveal
+  // window phase actually opened (never clear from a local phase name).
+  const roundAfterReveal = await keeperSdk.getRound(roundId);
+  const revealGate = templatePhaseGate(roundAfterReveal.status.tag as never, "clear");
+  if (revealGate) {
+    throw new Error(`template clear refused: ${revealGate.reason}`);
+  }
+
   banner("Phase 4 — Clear + Settle");
   while (clock.nowSeconds() <= revealDeadline + 3) {
     const r = revealDeadline + 4 - clock.nowSeconds();
@@ -254,6 +297,15 @@ async function testnetMain() {
   const close = await closeRound({ sdk: keeperSdk, drand, log }, roundId);
   if (!close.cleared || !close.settled) throw new Error(`close failed: ${JSON.stringify(close)}`);
   diagnostics.info("winner-3", `  winner: ${close.winner} (highest bid ${usdc(V2)})`);
+
+  // Escrow conservation preflight before declaring settlement success: the
+  // on-chain balances must conserve (operator delta + refunds + 0 balance).
+  const templateReceipt = await operator.exportReceipt(roundId);
+  const preflightConservation = checkEscrowConservation(templateReceipt);
+  if (!preflightConservation.ok) {
+    throw new Error(`template settle refused: ${preflightConservation.reason}`);
+  }
+  diagnostics.info("escrow-conservation-ok-2", `  ${preflightConservation.reason}`);
 
   const afterOp = await balanceOf(op);
   const afterB1 = await balanceOf(b1);
@@ -269,7 +321,7 @@ async function testnetMain() {
   if (afterB1 !== beforeB1) throw new Error(`bidder1 not refunded: ${afterB1} != ${beforeB1}`);
 
   banner("Phase 5 — Receipt Export + Verify");
-  const receipt = await operator.exportReceipt(roundId);
+  const receipt = templateReceipt;
   const result = verifyReceipt(receipt);
   for (const issue of result.issues) {
     diagnostics.info("progress-6", `  ${issue.severity === "error" ? "✗" : "!"} [${issue.code}] ${issue.message}`);

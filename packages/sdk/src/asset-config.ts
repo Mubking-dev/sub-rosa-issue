@@ -1,9 +1,22 @@
 import { normalizeError } from "@sub-rosa/logging/errors";
 // SPDX-License-Identifier: MIT
 import { StrKey } from "@stellar/stellar-sdk";
+import { Networks } from "@stellar/stellar-sdk";
 
 export class AssetConfigError extends Error {
   readonly name = "AssetConfigError";
+
+  constructor(
+    readonly field: string,
+    message: string,
+    options?: ErrorOptions,
+  ) {
+    super(`${field}: ${message}`, options);
+  }
+}
+
+export class AssetGuardError extends Error {
+  readonly name = "AssetGuardError";
 
   constructor(
     readonly field: string,
@@ -152,6 +165,63 @@ export function validateAssetConfig(
   }
 
   return config;
+}
+
+export interface AssetGuardInput {
+  networkPassphrase: string;
+  contractId: string;
+  decimals?: number;
+}
+
+export function assertAssetGuard(
+  input: AssetGuardInput,
+  expected: AssetConfig,
+): void {
+  if (typeof input.networkPassphrase !== "string") {
+    throw new AssetGuardError(
+      "networkPassphrase",
+      "network passphrase must be a string",
+    );
+  }
+
+  if (input.networkPassphrase === Networks.PUBLIC) {
+    throw new AssetGuardError(
+      "networkPassphrase",
+      "refusing to run on mainnet",
+    );
+  }
+
+  if (expected.type !== "sac") {
+    throw new AssetGuardError(
+      "type",
+      `expected asset type "sac", got "${expected.type}"`,
+    );
+  }
+
+  if (!expected.contractId) {
+    throw new AssetGuardError(
+      "contractId",
+      "expected asset config is missing contractId",
+    );
+  }
+
+  if (input.contractId !== expected.contractId) {
+    throw new AssetGuardError(
+      "contractId",
+      `SAC contract mismatch: got "${input.contractId}", expected "${expected.contractId}"`,
+    );
+  }
+
+  if (
+    input.decimals !== undefined &&
+    expected.decimals !== undefined &&
+    input.decimals !== expected.decimals
+  ) {
+    throw new AssetGuardError(
+      "decimals",
+      `decimals mismatch: got ${input.decimals}, expected ${expected.decimals}`,
+    );
+  }
 }
 
 export function validateAssetConfigs(input: unknown[]): AssetConfig[] {

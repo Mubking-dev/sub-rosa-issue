@@ -78,3 +78,33 @@ export interface ApiError {
   roundIds?: string[];
   roundId?: string;
 }
+
+/**
+ * A single, atomic snapshot shared by the round-status card and the
+ * keeper-status card so they can never disagree about phase, round id, or
+ * keeper cursor.
+ *
+ * `stale` is set when the snapshot is backed by an older data fetch, so
+ * consumers can render a staleness indicator without having to re-derive it.
+ *
+ * `keeperError` carries the *redacted* error string from the last keeper
+ * failure (RPC secrets removed).  When present the snapshot falls back to the
+ * last verified `phase` so the UI always has something coherent to show.
+ */
+export type DashboardPhase = "Open" | "Reveal" | "Settled";
+
+export interface DashboardSnapshot {
+  /** Canonical phase agreed on by both cards. */
+  phase: DashboardPhase;
+  /** Numeric round identifier from `meta.roundId`. */
+  roundId: number;
+  /** Keeper cursor (current phase slug from the keeper service). */
+  keeperCursor: string;
+  /** True when the backing data is older than the freshness threshold. */
+  stale: boolean;
+  /**
+   * Redacted keeper error string, if any.  RPC secrets (URLs, keys) are
+   * stripped before this reaches the UI.
+   */
+  keeperError: string | null;
+}

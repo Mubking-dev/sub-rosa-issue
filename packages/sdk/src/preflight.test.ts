@@ -10,7 +10,11 @@ import {
 } from "@stellar/stellar-sdk/contract";
 
 import { SubRosaClient } from "./client.js";
-import { SubRosaClientConfigError, SubRosaPreflightError } from "./errors.js";
+import {
+  SubRosaClientConfigError,
+  SubRosaEscrowConservationError,
+  SubRosaPreflightError,
+} from "./errors.js";
 import {
   contractErrorCode,
   evaluatePreflight,
@@ -290,6 +294,7 @@ describe("SubRosaClient preflight helpers", () => {
         commitment: new Uint8Array(32),
         ciphertext: new Uint8Array(64),
         auditorBlob: new Uint8Array(32),
+        sealRound: 1,
       },
       escrow: 1_000_000n,
     });
@@ -353,5 +358,138 @@ describe("SubRosaPreflightError", () => {
     assert.equal(error.operation, "commit");
     assert.equal(error.contractErrorCode, 10);
     assert.equal(error.contractErrorMessage, "CommitClosed");
+  });
+});
+
+describe("SubRosaClient escrow conservation preflight", () => {
+  const WINNER = "GBWINNERWINNERWINNERWINNERWINNERWINNERWINN3R";
+  const LOSER = "GBLOSERLOSERLOSERLOSERLOSERLOSERLOSERLOSER4";
+
+  function stubRound(
+    client: SubRosaClient,
+    round: Record<string, unknown>,
+  ): void {
+    Object.defineProperty(client.contract, "get_round", {
+      configurable: true,
+      value: async () =>
+        mockAssembledTransaction<unknown>("settle", { parsed: new Ok(round) }),
+    });
+  }
+
+  function stubIndex(
+    client: SubRosaClient,
+    bidders: string[],
+    escrow: Record<string, bigint>,
+  ): void {
+    Object.defineProperty(client.contract, "get_bidders_page", {
+      configurable: true,
+      value: async (args: { cursor: number; limit: number }) =>
+        mockAssembledTransaction<unknown>("settle", {
+          parsed: new Ok({
+            data: bidders.slice(args.cursor, args.cursor + args.limit),
+            next_cursor:
+              args.cursor + args.limit >= bidders.length ? 0 : args.cursor + args.limit,
+            total: bidders.length,
+          }),
+        }),
+    });
+    Object.defineProperty(client.contract, "get_bid_state", {
+      configurable: true,
+      value: async (args: { bidder: string }) => {
+        const held = escrow[args.bidder];
+        if (held === undefined) throw new Error("BidNotFound");
+        return mockAssembledTransaction<unknown>("settle", {
+          parsed: new Ok({
+            commitment: Buffer.alloc(32),
+            escrow: held,
+            revealed_nonce: undefined,
+            revealed_value: undefined,
+            settled: false,
+            valid: false,
+          }),
+        });
+      },
+    });
+  }
+
+  const CLEARED = {
+    item_ref: Buffer.alloc(32),
+    bidders: [WINNER, LOSER],
+    clearing_rule: { tag: "HighestBid", values: undefined },
+    commit_deadline: 1n,
+    reveal_deadline: 2n,
+    reveal_round: 3n,
+    auditor_pubkey: Buffer.alloc(96),
+    operator: PUBLIC_KEY,
+    status: { tag: "Cleared", values: undefined },
+    winner: WINNER,
+    winning_bid: 500n,
+  };
+
+  it("proves a settled-index conservation and returns the report", async () => {
+    const client = new SubRosaClient({ ...BASE_CONFIG, publicKey: PUBLIC_KEY });
+    stubRound(client, CLEARED);
+    stubIndex(client, [WINNER, LOSER], { [WINNER]: 700n, [LOSER]: 400n });
+
+    const report = await client.proveEscrowConservation(1, "settle");
+
+    assert.equal(report.conserved, true);
+    assert.equal(report.bidders, 2);
+    assert.equal(report.escrowHeld, 1_100n);
+    assert.equal(report.payable, 500n);
+    assert.equal(report.winnerEscrow, 700n);
+    assert.equal(report.surplus, 200n);
+    assert.equal(report.refundable, 400n);
+    assert.equal(report.stranded, 0n);
+  });
+
+  it("throws the typed escrow error when a bidder is missing from the index", async () => {
+    const client = new SubRosaClient({ ...BASE_CONFIG, publicKey: PUBLIC_KEY });
+    stubRound(client, CLEARED);
+    // The loser's escrow is locked, but their address left the index.
+    stubIndex(client, [WINNER], { [WINNER]: 700n });
+
+    await assert.rejects(
+      client.preflightSettleConservation(1),
+      (error: unknown) => {
+        assert.ok(error instanceof SubRosaEscrowConservationError);
+        assert.equal(error.kind, "escrow_not_conserved");
+        assert.equal(error.phase, "settle");
+        assert.equal(error.roundId, 1n);
+        assert.equal(error.report.conserved, false);
+        return true;
+      },
+    );
+  });
+
+  it("throws the typed escrow error when the round is not cleared", async () => {
+    const client = new SubRosaClient({ ...BASE_CONFIG, publicKey: PUBLIC_KEY });
+    stubRound(client, { ...CLEARED, status: { tag: "Revealing", values: undefined } });
+    stubIndex(client, [WINNER, LOSER], { [WINNER]: 700n, [LOSER]: 400n });
+
+    await assert.rejects(client.preflightSettleConservation(1), (error: unknown) => {
+      assert.ok(error instanceof SubRosaEscrowConservationError);
+      assert.ok(
+        error.report.issues.some((i) => i.code === "round_wrong_status"),
+        "expected a round_wrong_status issue",
+      );
+      return true;
+    });
+  });
+
+  it("proves a void once every escrow is refundable", async () => {
+    const client = new SubRosaClient({ ...BASE_CONFIG, publicKey: PUBLIC_KEY });
+    stubRound(client, {
+      ...CLEARED,
+      winner: null,
+      winning_bid: 0n,
+      status: { tag: "Revealing", values: undefined },
+    });
+    stubIndex(client, [WINNER, LOSER], { [WINNER]: 700n, [LOSER]: 400n });
+
+    const report = await client.preflightVoidConservation(1);
+    assert.equal(report.conserved, true);
+    assert.equal(report.refundable, 1_100n);
+    assert.equal(report.payable, 0n);
   });
 });

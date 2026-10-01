@@ -3,8 +3,8 @@ import { normalizeError } from "@sub-rosa/logging/errors";
 // Autonomous bidder agent — appraisal (x402) → seal → commit.
 //
 // The agent never uses the principal key on-chain. It verifies its session
-// mandate, pays for an appraisal, sizes a bid within the mandate caps, seals
-// with tlock, and commits via the SDK using the session secret.
+// mandate, pays for an appraisal, sizes a bid within the mandate caps, seals with tlock,
+// and commits via the SDK using the session secret.
 
 import { Keypair } from "@stellar/stellar-sdk";
 import type { Network, SettleResponse } from "@x402/core/types";
@@ -20,11 +20,14 @@ import {
 } from "@sub-rosa/tlock";
 
 import {
+  assertAppraisalQuoteAllowed,
+  assertAppraisalRequestBodyAllowed,
   assertAppraisalSpendAllowed,
   assertBidWithinMandate,
   bidFromAppraisal,
   stroopsToUsdc,
   verifySessionMandate,
+  type MandateAppraisalQuote,
   type SessionMandate,
 } from "./mandate.js";
 
@@ -41,10 +44,35 @@ export interface BidderAgentConfig {
   revealRound: number;
   /** Appraisal attributes — each agent can supply its own private view. */
   attributes: AppraisalAttributes;
+  /** Expected appraisal payment asset (C...). Falls back to mandate.appraisalAsset. */
+  appraisalAsset?: string;
+  /** Expected appraisal payment destination (payTo). Falls back to mandate.appraisalPayTo. */
+  appraisalPayTo?: string;
   x402Network?: Network;
   drand?: DrandClient;
   log?: (msg: string) => void;
   clock?: Clock;
+  /**
+   * Observes the SDK commit call. Emits `pending` right before the SDK call,
+   * then exactly one of `committed` (the SDK call resolved) or `failed`.
+   */
+  onCommitStatus?: (outcome: AgentCommitOutcome) => void;
+}
+
+/** Commit status for one bidder, derived only from the SDK `commit` result. */
+export type AgentCommitOutcome =
+  | { status: "pending"; bidder: string }
+  | { status: "committed"; bidder: string }
+  | { status: "failed"; bidder: string; code: string };
+
+/** Stable, secret-free code for an SDK commit failure (error class plus contract code when known). */
+export function commitErrorCode(error: unknown): string {
+  if (error instanceof Error) {
+    const contractCode = (error as { contractErrorCode?: unknown }).contractErrorCode;
+    const base = error.name && error.name !== "Error" ? error.name : "CommitError";
+    return typeof contractCode === "number" ? `${base}#${contractCode}` : base;
+  }
+  return "CommitError";
 }
 
 export interface BidderAgentResult {
@@ -55,6 +83,7 @@ export interface BidderAgentResult {
   appraisal: Appraisal;
   appraisalSettlement?: SettleResponse;
   inputsHash: string;
+  commit: AgentCommitOutcome;
 }
 
 function appraisalRequest(mandate: SessionMandate, attributes: AppraisalAttributes): AppraisalRequest {
@@ -131,16 +160,30 @@ export async function runBidderAgent(config: BidderAgentConfig, dependencies: Bi
   const quotedPrice = BigInt(config.mandate.appraisalPriceStroops);
   assertAppraisalSpendAllowed(config.mandate, quotedPrice, 0n);
 
-  log(`paying appraisal (${stroopsToUsdc(quotedPrice)} USDC)…`);
+const requestBody = JSON.stringify(req);
+  // Fail closed before any payment: empty/oversized/credential-like bodies
+  // throw a typed refusal the keeper trace can show — no transfer happens.
+  assertAppraisalRequestBodyAllowed(requestBody);
+
+  const expectedAsset = config.appraisalAsset ?? config.mandate.appraisalAsset;
+  const expectedDestination = config.appraisalPayTo ?? config.mandate.appraisalPayTo;
+
+  log(`paying appraisal (${stroopsToUsdc(quotedPrice)} USDC…);
   const paidFetch = dependencies.createPaidFetch({
     secret: config.sessionSecret,
     network: config.x402Network ?? "stellar:testnet",
     rpcUrl: config.rpcUrl,
+    expectedQuote: {
+      ...(expectedAsset !== undefined ? { asset: expectedAsset } : {}),
+      ...(expectedDestination !== undefined ? { destination: expectedDestination } : {}),
+      maxAmountStroops: quotedPrice,
+      nowSeconds: clock.nowSeconds(),
+    },
   });
-  const paid = await paidFetch<{ appraisal: Appraisal }>(config.appraisalUrl, {
+  const paid = await paidFetch<{ appraisal: Appraisal; quote?: MandateAppraisalQuote }>(config.appraisalUrl, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify(req),
+    body: requestBody,
   });
   if (paid.status !== 200 || !paid.body.appraisal) {
     throw new Error("appraisal failed", { cause: normalizeError(paid.body, { status: paid.status }) });
@@ -148,6 +191,17 @@ export async function runBidderAgent(config: BidderAgentConfig, dependencies: Bi
   const appraisal = paid.body.appraisal;
   if (appraisal.itemRef !== config.mandate.itemRef) {
     throw new Error("appraisal itemRef mismatch");
+  }
+  // Bind the settled quote (when the server echoes one) to the mandate before
+  // sealing: a drifted asset/amount/destination/expiry refuses the bid even
+  // though the payment already settled — the refusal is typed for traces.
+  if (paid.body.quote) {
+    assertAppraisalQuoteAllowed(config.mandate, paid.body.quote, {
+      spentSoFarStroops: 0n,
+      clock,
+      ...(expectedAsset !== undefined ? { expectedAsset } : {}),
+      ...(expectedDestination !== undefined ? { expectedDestination } : {}),
+    });
   }
 
   const { bidValue, escrow } = bidFromAppraisal(appraisal.suggestedMaxBid, config.mandate);
@@ -158,9 +212,12 @@ export async function runBidderAgent(config: BidderAgentConfig, dependencies: Bi
   const drand = config.drand ?? quicknet();
   const nonce = generateNonce();
   const sealed = await dependencies.sealBid({
+    contractId: config.mandate.contractId,
+    bidderId: sessionKp.publicKey(),
     value: bidValue,
     nonce,
     round: revealRound,
+    revealRound,
     client: drand,
     identity: new TextEncoder().encode(`agent:${sessionKp.publicKey()}`),
     auditorPublicKey,
@@ -175,7 +232,17 @@ export async function runBidderAgent(config: BidderAgentConfig, dependencies: Bi
   // Sealing and simulation may consume the remaining window; the contract is final authority.
   assertCommitEligible(await reader.getRound(roundId), roundId, clock);
   verifySessionMandate(config.mandate, { clock, roundId, contractId: config.mandate.contractId });
-  await bidder.commit({ roundId, sealed, escrow });
+  const bidderAddress = sessionKp.publicKey();
+  const report = config.onCommitStatus ?? (() => {});
+  report({ status: "pending", bidder: bidderAddress });
+  try {
+    await bidder.commit({ roundId, sealed, escrow });
+  } catch (error) {
+    report({ status: "failed", bidder: bidderAddress, code: commitErrorCode(error) });
+    throw error;
+  }
+  const commit: AgentCommitOutcome = { status: "committed", bidder: bidderAddress };
+  report(commit);
   log(`committed sealed bid for round ${roundId}`);
 
   return {
@@ -186,5 +253,6 @@ export async function runBidderAgent(config: BidderAgentConfig, dependencies: Bi
     appraisal,
     appraisalSettlement: paid.settlement,
     inputsHash: appraisal.inputsHash,
+    commit,
   };
 }

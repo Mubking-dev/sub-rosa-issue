@@ -2,7 +2,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { normalizeRoundId, normalizeSorobanContractId } from "./ids.js";
+import { normalizeRoundId, normalizeSorobanContractId, normalizeBidderId } from "./ids.js";
 
 describe("normalizeRoundId", () => {
   it("accepts trimmed decimal strings and numeric values", () => {
@@ -50,7 +50,7 @@ describe("normalizeRoundId", () => {
 
 describe("normalizeSorobanContractId", () => {
   it("trims and canonicalizes valid contract ids", () => {
-    const source = "CCW67TSA3JH6KABMZAWOS6J2GKY6BKBJ5TKQAMM6P3EXZ7OAFM2TJ5BQ";
+    const source = "CDAZ5AJPVCJ6R3BQUPYISBSWV77HZ52T7YFWZGTVEEEFW5FVHZAK2JIM";
     assert.equal(normalizeSorobanContractId(`  ${source.toLowerCase()}  `), source);
   });
 
@@ -58,8 +58,25 @@ describe("normalizeSorobanContractId", () => {
     assert.throws(() => normalizeSorobanContractId(""), /contractId/);
     assert.throws(() => normalizeSorobanContractId("   "), /contractId/);
     assert.throws(() => normalizeSorobanContractId("not-a-contract-id"), /contractId/);
-    assert.throws(() => normalizeSorobanContractId("CCW67TSA3JH6KABMZAWOS6J2GKY6BKBJ5TKQAMM6P3EXZ7OAFM2TJ5BQ!"), /contractId/);
+    assert.throws(() => normalizeSorobanContractId("CDAZ5AJPVCJ6R3BQUPYISBSWV77HZ52T7YFWZGTVEEEFW5FVHZAK2JIM!"), /contractId/);
     assert.throws(() => normalizeSorobanContractId("C123"), /contractId/);
+    assert.throws(() => normalizeSorobanContractId("GA3AD2G2SGYLMYVV2F6G5BIFU4X2XZIGA44ZF32ZZ645P4LT4N4EKQHY"), /contractId/); // an account id used where a contract id is required
+  });
+});
+
+describe("normalizeBidderId", () => {
+  it("trims and canonicalizes valid bidder ids", () => {
+    const source = "GA3AD2G2SGYLMYVV2F6G5BIFU4X2XZIGA44ZF32ZZ645P4LT4N4EKQHY";
+    assert.equal(normalizeBidderId(`  ${source.toLowerCase()}  `), source);
+  });
+
+  it("rejects malformed or empty bidder ids", () => {
+    assert.throws(() => normalizeBidderId(""), /bidderId/);
+    assert.throws(() => normalizeBidderId("   "), /bidderId/);
+    assert.throws(() => normalizeBidderId("not-a-bidder-id"), /bidderId/);
+    assert.throws(() => normalizeBidderId("GA3AD2G2SGYLMYVV2F6G5BIFU4X2XZIGA44ZF32ZZ645P4LT4N4EKQHY!"), /bidderId/);
+    assert.throws(() => normalizeBidderId("G123"), /bidderId/);
+    assert.throws(() => normalizeBidderId("CDAZ5AJPVCJ6R3BQUPYISBSWV77HZ52T7YFWZGTVEEEFW5FVHZAK2JIM"), /bidderId/); // a contract id used where a bidder id is required
   });
 });
 

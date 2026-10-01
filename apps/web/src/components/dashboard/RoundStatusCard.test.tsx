@@ -6,6 +6,7 @@ import { createFakeTime } from "@sub-rosa/time";
 
 import { DASHBOARD_FIXTURE } from "../../dashboard/fixture";
 import type { DashboardData } from "../../dashboard/types";
+import { buildDashboardSnapshot } from "../../dashboard/snapshot";
 import { TimeProvider } from "../../lib/time";
 import { RoundStatusCard } from "./RoundStatusCard";
 
@@ -18,9 +19,12 @@ function drandPublishedNowMs(revealRound: number): number {
 
 function renderCard(data: DashboardData, nowMs?: number): string {
   const fake = createFakeTime(nowMs ?? drandPublishedNowMs(data.round.revealRound));
+  // Drand published when nowMs is past the reveal round's publish time
+  const drandPublished = (fake.clock.nowMs() / 1000) >= QUICKNET_GENESIS + QUICKNET_PERIOD * data.round.revealRound;
+  const snapshot = buildDashboardSnapshot(data, drandPublished, false);
   return renderToStaticMarkup(
     <TimeProvider value={fake}>
-      <RoundStatusCard data={data} />
+      <RoundStatusCard data={data} snapshot={snapshot} />
     </TimeProvider>,
   );
 }
@@ -69,4 +73,13 @@ test("round status card renders reveal phase when an open round passed R", () =>
 
   assert.match(html, /Reveal/);
   assert.match(html, /has already published/);
+});
+
+test("round status card shows the snapshot round id", () => {
+  const data: DashboardData = {
+    ...DASHBOARD_FIXTURE,
+    meta: { ...DASHBOARD_FIXTURE.meta, roundId: 42 },
+  };
+  const html = renderCard(data);
+  assert.match(html, /42/);
 });

@@ -192,19 +192,44 @@ Deploying new contract round?
 
 ```bash
 pnpm mainnet:ready -- --strict       # consolidated read-only readiness
+pnpm mainnet:ready -- --fixture packages/sdk/fixtures/mainnet-readiness.json   --strict                           # CI-safe: recorded deployment, no mainnet RPC
 pnpm mainnet:verify              # read-only — no secrets
 pnpm mainnet:micro               # dry-run checklist
 MAINNET_CONFIRM=SUB_ROSA_MAINNET OPERATOR_SECRET=S… BIDDER_SECRET=S… \
   pnpm mainnet:micro -- --execute   # optional micro commit (≤1 XLM escrow)
+pnpm mainnet:settle                 # readiness + capped, read-only dry-run
 MAINNET_CONFIRM=SUB_ROSA_MAINNET KEEPER_SECRET=S… ROUND_CONTRACT_ID=C… \
-  pnpm mainnet:settle               # keeper settle (requires readiness + confirm)
+  pnpm mainnet:settle -- --execute  # keeper settle (requires readiness + confirm)
 ```
+
+### What readiness pins
+
+`pnpm mainnet:ready` and `pnpm mainnet:verify` load the committed manifest
+(`packages/sdk/mainnet-artifacts.json`) and compare the live deployment with it
+through the read-only client. Four fields must agree, and each one blocks on its
+own:
+
+| manifest field      | live value it is compared against                    |
+| ------------------- | --------------------------------------------------- |
+| `contractId`        | the contract the client is bound to                 |
+| `networkPassphrase` | the passphrase the RPC reports                      |
+| `wasmHash`          | the executable hash in the contract ledger entry      |
+| `tokenContract`     | `usdc` in the deployed `GlobalConfig` (escrow SAC)   |
+
+A field that cannot be read blocks too, and the report names the disagreeing
+field. Passphrases are printed as a short fingerprint, never in full, so logs
+stay shareable. The manifest is a committed file on purpose: editing readiness,
+the manifest, and the verify script in one review is what keeps a green check
+honest.
+
+Neither command needs a secret key. Balance checks take public keys:
+`OPERATOR_PUBLIC_KEY`, `KEEPER_PUBLIC_KEY`, `BIDDER_PUBLIC_KEY`.
 
 ### Mainnet launch checklist
 
 1. Run `pnpm mainnet:ready -- --strict` (no secrets required for baseline checks).
 2. Run `pnpm mainnet:verify` to confirm settled round 1 matches frozen artifacts.
-3. Optional balance review: `pnpm mainnet:ready -- --with-balances` with funded operator/keeper secrets in env.
+3. Optional balance review: `pnpm mainnet:ready -- --with-balances` with funded operator/keeper **public** keys in env.
 4. For value-moving commands, set `MAINNET_CONFIRM=SUB_ROSA_MAINNET` and re-run readiness implicitly via deploy/micro/settle guards.
 5. After settlement, confirm contract native XLM SAC balance is **0** (settle script enforces this).
 

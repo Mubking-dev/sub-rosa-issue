@@ -4,8 +4,9 @@ import assert from "node:assert/strict";
 import { createFakeTime } from "@sub-rosa/time";
 
 import http from "node:http";
+import { Readable } from "node:stream";
 
-import { createStatusServer } from "./status-server.js";
+import { createStatusHandler, createStatusServer } from "./status-server.js";
 import type { BuildStatusSource } from "./status.js";
 import type { WatchedRound } from "./store.js";
 
@@ -84,6 +85,36 @@ function makeSource(overrides: Partial<BuildStatusSource> = {}): BuildStatusSour
   };
 }
 
+async function invokeHandler(
+  source: BuildStatusSource,
+  path: string,
+): Promise<{ status: number; headers: Record<string, string>; body: unknown }> {
+  const handler = createStatusHandler(source);
+  const req = Object.assign(Readable.from([]), {
+    method: "GET",
+    url: path,
+    headers: { host: "localhost" },
+  });
+  return new Promise((resolve) => {
+    const response = {
+      statusCode: 0,
+      headers: {} as Record<string, string>,
+      writeHead(status: number, headers: Record<string, string>) {
+        this.statusCode = status;
+        this.headers = headers;
+      },
+      end(payload: string) {
+        resolve({
+          status: this.statusCode,
+          headers: this.headers,
+          body: JSON.parse(payload),
+        });
+      },
+    };
+    handler(req as http.IncomingMessage, response as unknown as http.ServerResponse);
+  });
+}
+
 async function withServer(
   source: BuildStatusSource,
   fn: (server: http.Server) => Promise<void>,
@@ -125,6 +156,45 @@ test("GET /status returns a full status response", async () => {
     assert.equal(rounds[0].roundId, "1");
     assert.equal(rounds[0].status, "Open");
   });
+});
+
+test("status handler reads the live checkpoint and disables caching", async () => {
+  let cursor = 4;
+  const source = makeSource({
+    storeRounds: () => [{
+      roundId: "1",
+      lastStatus: "Open",
+      retryCount: 0,
+      phase: "awaiting-drand",
+      cursor,
+      lastHash: "hash-abc",
+    }],
+  });
+
+  const first = await invokeHandler(source, "/status");
+  cursor = 5;
+  const second = await invokeHandler(source, "/status");
+
+  assert.equal(first.headers["cache-control"], "no-store");
+  assert.equal((first.body as { rounds: Array<Record<string, unknown>> }).rounds[0].cursor, 4);
+  assert.equal((second.body as { rounds: Array<Record<string, unknown>> }).rounds[0].cursor, 5);
+  assert.equal((second.body as { rounds: Array<Record<string, unknown>> }).rounds[0].roundId, "1");
+  assert.equal((second.body as { rounds: Array<Record<string, unknown>> }).rounds[0].phase, "awaiting-drand");
+  assert.equal((second.body as { rounds: Array<Record<string, unknown>> }).rounds[0].lastHash, "hash-abc");
+});
+
+test("status handler does not expose upstream error details", async () => {
+  const secretRpc = "https://user:password@rpc.example.internal/?api_key=secret-token";
+  const res = await invokeHandler(makeSource({
+    drand: {
+      chain: () => ({
+        info: async () => { throw new Error(`upstream failed at ${secretRpc}`); },
+      }),
+    } as never,
+  }), "/healthz");
+
+  assert.equal(res.status, 503);
+  assert.doesNotMatch(JSON.stringify(res.body), /rpc\.example\.internal|password|secret-token/);
 });
 
 test("GET /status/rounds/:id returns a single round", async () => {

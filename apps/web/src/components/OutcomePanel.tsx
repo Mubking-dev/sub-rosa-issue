@@ -1,6 +1,8 @@
 // Copyright (c) 2026 Sub Rosa contributors
 import { motion } from "framer-motion";
 import type { UseCase } from "../config/useCases";
+import type { VerifiedSettlement } from "../lib/verified-settlement";
+import { VerifiedSettlementSummary } from "./VerifiedSettlementSummary";
 
 export interface OutcomePeer {
   /** display label (e.g. "Member alpha" or shortened on-chain address) */
@@ -68,6 +70,7 @@ export function OutcomePanel({
   userValue,
   peers,
   isReal,
+  settlement,
 }: {
   useCase: UseCase;
   /** user's revealed numeric value */
@@ -76,6 +79,11 @@ export function OutcomePanel({
   peers: OutcomePeer[];
   /** whether `peers` were sourced from real on-chain bidders */
   isReal: boolean;
+  /**
+   * Receipt-verified settlement. When supplied it replaces the locally sorted
+   * winner, so the panel shows exactly what the settlement rail shows.
+   */
+  settlement?: VerifiedSettlement;
 }) {
   return (
     <motion.section
@@ -90,7 +98,11 @@ export function OutcomePanel({
         </span>
         <h2>{useCase.tagline} · final result</h2>
       </header>
-      <HighestOutcome useCase={useCase} peers={peers} userValue={userValue} />
+      {settlement ? (
+        <VerifiedSettlementSummary settlement={settlement} />
+      ) : (
+        <HighestOutcome useCase={useCase} peers={peers} userValue={userValue} />
+      )}
     </motion.section>
   );
 }

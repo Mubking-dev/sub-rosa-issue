@@ -19,3 +19,45 @@ test("quicknet countdown crosses the target at the expected epoch", () => {
   assert.equal(localCountdown(10, QUICKNET_GENESIS + 30).published, true);
   assert.equal(localCountdown(10, QUICKNET_GENESIS + 31).secondsRemaining, 0);
 });
+
+test("one millisecond before the boundary, reveal stays disabled", () => {
+  const round = 10;
+  const boundaryMs = timeOfRound(round) * 1000;
+  const before = localCountdown(round, boundaryMs - 1);
+  assert.equal(before.published, false);
+  assert.equal(before.secondsRemaining, 1);
+  assert.equal(before.currentRound, 9);
+});
+
+test("at the boundary, reveal becomes available", () => {
+  const round = 10;
+  const boundaryMs = timeOfRound(round) * 1000;
+  const at = localCountdown(round, boundaryMs);
+  assert.equal(at.published, true);
+  assert.equal(at.secondsRemaining, 0);
+  assert.equal(at.currentRound, 10);
+});
+
+test("a mutated period fails the fixture comparison", () => {
+  const round = 10;
+  const fixtureTargetTime = timeOfRound(round);
+  const mutatedPeriod = 4;
+  const mutatedTargetTime = timeOfRound(round, mutatedPeriod);
+  assert.notEqual(mutatedTargetTime, fixtureTargetTime);
+
+  // At the fixture boundary, mutated period remains unrevealed
+  const atFixtureBoundary = localCountdown(round, fixtureTargetTime * 1000, mutatedPeriod);
+  assert.equal(atFixtureBoundary.published, false);
+});
+
+test("reveal stays available through the last second of the period", () => {
+  const round = 10;
+  const boundaryMs = timeOfRound(round) * 1000;
+  // Last millisecond before round 11
+  const endOfPeriodMs = boundaryMs + 3 * 1000 - 1;
+  const duringPeriod = localCountdown(round, endOfPeriodMs);
+  assert.equal(duringPeriod.published, true);
+  assert.equal(duringPeriod.secondsRemaining, 0);
+  assert.equal(duringPeriod.currentRound, 10);
+});
+

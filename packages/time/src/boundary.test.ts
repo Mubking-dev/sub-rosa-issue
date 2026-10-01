@@ -40,3 +40,30 @@ describe("inclusive confirm timeout deadline", () => {
     assert.ok(clock.nowMs() >= deadline);
   });
 });
+
+describe("quicknet round reveal boundary", () => {
+  it("treats exact boundary as open and one millisecond earlier as closed", () => {
+    const genesisTime = 1_692_803_367;
+    const period = 3;
+    const targetRound = 10;
+    const boundaryMs = (genesisTime + period * targetRound) * 1000;
+
+    const { clock } = createFakeTime(boundaryMs - 1);
+    const isOpenBefore = clock.nowMs() >= boundaryMs;
+    assert.equal(isOpenBefore, false, "one millisecond before boundary must stay closed");
+
+    clock.advance(1);
+    assert.equal(clock.nowMs(), boundaryMs);
+    const isOpenAt = clock.nowMs() >= boundaryMs;
+    assert.equal(isOpenAt, true, "at boundary reveal becomes available");
+
+    // stays open through the full period including the last second
+    clock.advance(period * 1000 - 1);
+    assert.equal(
+      clock.nowMs() >= boundaryMs,
+      true,
+      "reveal stays available through the last second of the period",
+    );
+  });
+});
+

@@ -5,11 +5,14 @@ import { StrKey } from "@stellar/stellar-sdk";
 
 import {
   AssetConfigError,
+  AssetGuardError,
+  assertAssetGuard,
   validateAssetConfig,
   validateAssetConfigs,
   ASSET_FIXTURES,
   type AssetConfig,
 } from "./asset-config.js";
+import { Networks } from "@stellar/stellar-sdk";
 
 describe("validateAssetConfig - valid fixtures", () => {
   it("accepts native XLM config", () => {
@@ -295,5 +298,83 @@ describe("asset-specific decimal limits", () => {
   }
   it("retains SAC support above the native precision limit", () => {
     assert.equal(validateAssetConfig({ ...ASSET_FIXTURES.valid.sac, decimals: 8 }).decimals, 8);
+  });
+});
+
+describe("assertAssetGuard - asset config guard for setup scripts", () => {
+  const expected = validateAssetConfig(ASSET_FIXTURES.valid.sac);
+
+  it("passes a testnet setup whose SAC contract matches the expected asset", () => {
+    assert.doesNotThrow(() =>
+      assertAssetGuard(
+        {
+          networkPassphrase: Networks.TESTNET,
+          contractId: expected.contractId as string,
+          decimals: expected.decimals,
+        },
+        expected,
+      ),
+    );
+  });
+
+  it("rejects a mainnet passphrase before a transaction is built", () => {
+    assert.throws(
+      () =>
+        assertAssetGuard(
+          {
+            networkPassphrase: Networks.PUBLIC,
+            contractId: expected.contractId as string,
+          },
+          expected,
+        ),
+      (err: unknown) =>
+        err instanceof AssetGuardError && err.field === "networkPassphrase",
+    );
+  });
+
+  it("rejects a different SAC contract", () => {
+    assert.throws(
+      () =>
+        assertAssetGuard(
+          {
+            networkPassphrase: Networks.TESTNET,
+            contractId: "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCTN",
+          },
+          expected,
+        ),
+      (err: unknown) =>
+        err instanceof AssetGuardError && err.field === "contractId",
+    );
+  });
+
+  it("rejects a decimals mismatch", () => {
+    assert.throws(
+      () =>
+        assertAssetGuard(
+          {
+            networkPassphrase: Networks.TESTNET,
+            contractId: expected.contractId as string,
+            decimals: 6,
+          },
+          expected,
+        ),
+      (err: unknown) =>
+        err instanceof AssetGuardError && err.field === "decimals",
+    );
+  });
+
+  it("does not contact a live RPC", () => {
+    // assertAssetGuard performs pure value comparisons only.
+    const before = Date.now();
+    assert.doesNotThrow(() =>
+      assertAssetGuard(
+        {
+          networkPassphrase: Networks.TESTNET,
+          contractId: expected.contractId as string,
+        },
+        expected,
+      ),
+    );
+    assert.ok(Date.now() - before < 100);
   });
 });

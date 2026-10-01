@@ -6,10 +6,14 @@ import {
   StatusJsonParseError,
   type SdkErrorCode,
 } from "@sub-rosa/sdk";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import type { DashboardData } from "../dashboard/types";
+import type { DashboardSnapshot } from "@sub-rosa/sdk";
 import { DASHBOARD_FIXTURE } from "../dashboard/fixture";
 import { assertDashboardData } from "../dashboard/fixture-health-check";
+import { buildDashboardSnapshot } from "../dashboard/snapshot";
 import { useTime } from "../lib/time";
+import { useDrandCountdown } from "./useDrandCountdown";
 
 const STALE_THRESHOLD_MS = 5 * 60 * 1000; // 5 minutes
 const LIVE_POLL_INTERVAL_MS = 30 * 1000; // 30 seconds
@@ -29,6 +33,12 @@ export type DashboardState =
 export type UseDashboardDataResult = DashboardState & {
   /** A load is in flight. A `ready` round stays on screen while it reloads. */
   refreshing: boolean;
+export interface UseDashboardDataResult {
+  data: DashboardData | null;
+  snapshot: DashboardSnapshot | null;
+  loading: boolean;
+  error: string | null;
+  stale: boolean;
   refetch: () => void;
 };
 
@@ -116,6 +126,12 @@ export function useDashboardData(
   // Only the most recently started load may publish, so an older response can
   // never overwrite (or resurrect data over) the result of a newer one.
   const latestLoad = useRef(0);
+  const [state, setState] = useState<Omit<UseDashboardDataResult, "snapshot" | "refetch">>(() => ({
+    data: null,
+    loading: true,
+    error: null,
+    stale: false,
+  }));
 
   const fetchData = useCallback(async () => {
     const load = ++latestLoad.current;
@@ -191,9 +207,26 @@ export function useDashboardData(
     return () => scheduler.clear(handle);
   }, [hasData, clock, scheduler]);
 
+  // Build the shared snapshot from the drand countdown for the current round's
+  // reveal round.  useDrandCountdown returns a stable object that updates when
+  // the drand published state changes, so the snapshot is always coherent.
+  const revealRound = state.data?.round.revealRound ?? 0;
+  const drand = useDrandCountdown(revealRound);
+
+  const snapshot = useMemo<DashboardSnapshot | null>(() => {
+    if (!state.data) return null;
+    return buildDashboardSnapshot(
+      state.data,
+      drand.published,
+      state.stale,
+      drand.error,
+    );
+  }, [state.data, drand.published, drand.error, state.stale]);
+
   return {
     ...state,
     refreshing,
+    snapshot,
     refetch: fetchData,
   };
 }

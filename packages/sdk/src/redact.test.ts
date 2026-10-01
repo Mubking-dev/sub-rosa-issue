@@ -2,9 +2,31 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { serializeReceipt, parseReceipt, type RoundReceipt } from "./receipt.js";
+import { serializeReceipt, parseReceipt, type RoundReceipt, type RoundReceiptEvent } from "./receipt.js";
 import { redactReceipt, type BidReceiptEntry } from "./redact.js";
 import { verifyReceipt } from "./verify.js";
+
+/** Ordered lifecycle event log for a healthy settled round (roundId "1"). */
+function makeEventLog(): RoundReceiptEvent[] {
+  const names = [
+    "created", "commit", "revealing", "reveal", "cleared", "settled",
+  ] as const;
+  const phases = {
+    created: "round-created",
+    commit: "bid-commit",
+    revealing: "reveal-opened",
+    reveal: "bid-reveal",
+    cleared: "round-cleared",
+    settled: "round-finalized",
+  } as const;
+  return names.map((name, i) => ({
+    name,
+    topics: ["symbol_short", "u64"] as const,
+    roundId: "1",
+    ledger: 1728000 + i,
+    phase: phases[name],
+  }));
+}
 
 function makeReceipt(): RoundReceipt {
   return {
@@ -70,6 +92,7 @@ function makeReceipt(): RoundReceipt {
     winner: "GB5HN3Y8ZRLRK6Z6Y4X4Y4X4Y4X4Y4X4Y4X4Y4X4Y4X4Y4X4Y4X4Y4X4Y4",
     winningValue: "250",
     status: "Settled",
+    events: makeEventLog(),
   };
 }
 

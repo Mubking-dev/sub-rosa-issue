@@ -167,6 +167,9 @@ importers:
       '@noble/hashes':
         specifier: ^2.2.0
         version: 2.2.0
+      '@stellar/stellar-sdk':
+        specifier: ^15.1.0
+        version: 15.1.0
       '@sub-rosa/logging':
         specifier: workspace:*
         version: link:../logging
@@ -295,6 +298,9 @@ importers:
         specifier: workspace:*
         version: link:../../packages/logging
     devDependencies:
+      '@sub-rosa/tlock':
+        specifier: workspace:*
+        version: link:../../packages/tlock
       '@types/node':
         specifier: ^25.9.1
         version: 25.9.1

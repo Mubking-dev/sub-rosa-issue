@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { x402HTTPClient } from "@x402/core/client";
 import { Keypair } from "@stellar/stellar-sdk";
 import { describe, test } from "node:test";
@@ -24,6 +25,8 @@ const VALID_402_BODY = {
   metadata: {},
 };
 
+const VALID_402_BODY_HASH = createHash("sha256").update(JSON.stringify(VALID_402_BODY)).digest("hex");
+
 function buildResponse(status: number, body: string | undefined, headers?: Record<string, string>) {
   const headersMap = new Headers(headers ?? {});
   return new Response(body ?? "", {
@@ -33,6 +36,152 @@ function buildResponse(status: number, body: string | undefined, headers?: Recor
 }
 
 describe("createPaidFetch response parsing", () => {
+  test("pays an exact challenge that matches the request", async () => {
+    const paidFetch = createPaidFetch({ secret: TEST_SECRET });
+    const originalFetch = globalThis.fetch;
+    const originalGetPaymentRequiredResponse = x402HTTPClient.prototype.getPaymentRequiredResponse;
+    const originalCreatePaymentPayload = x402HTTPClient.prototype.createPaymentPayload;
+    const originalEncodePaymentSignatureHeader =
+      x402HTTPClient.prototype.encodePaymentSignatureHeader;
+    const originalGetPaymentSettleResponse = x402HTTPClient.prototype.getPaymentSettleResponse;
+
+    x402HTTPClient.prototype.getPaymentRequiredResponse = () => VALID_402_BODY as never;
+    x402HTTPClient.prototype.createPaymentPayload = async () => ({
+      x402Version: 2,
+      payload: "stub-payload",
+      resource: "https://example.com/appraise",
+      accepted: VALID_402_BODY.accepts[0],
+      extensions: {},
+    }) as never;
+    x402HTTPClient.prototype.encodePaymentSignatureHeader = () => ({
+      "X-PAYMENT": "stub-signature",
+    });
+    x402HTTPClient.prototype.getPaymentSettleResponse = () => ({
+      transaction: "stub-tx",
+      network: "stellar:testnet",
+      payer: "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    }) as never;
+
+    let calls = 0;
+    globalThis.fetch = async (_url, _init) => {
+      calls += 1;
+      if (calls === 1) {
+        return buildResponse(402, JSON.stringify(VALID_402_BODY), {
+          "x402-version": "2",
+          "x402-payment-required": "1",
+        });
+      }
+      if (calls === 2) {
+        return buildResponse(200, JSON.stringify({ ok: true }));
+      }
+      throw new Error("unexpected extra fetch call");
+    };
+
+    try {
+      const response = await paidFetch("https://example.com/appraise");
+      assert.equal(response.status, 200);
+      assert.equal(calls, 2);
+    } finally {
+      globalThis.fetch = originalFetch;
+      x402HTTPClient.prototype.getPaymentRequiredResponse = originalGetPaymentRequiredResponse;
+      x402HTTPClient.prototype.createPaymentPayload = originalCreatePaymentPayload;
+      x402HTTPClient.prototype.encodePaymentSignatureHeader = originalEncodePaymentSignatureHeader;
+      x402HTTPClient.prototype.getPaymentSettleResponse = originalGetPaymentSettleResponse;
+    }
+  });
+
+  test("does not pay when the challenge amount differs from the request", async () => {
+    const paidFetch = createPaidFetch({ secret: TEST_SECRET });
+    const originalFetch = globalThis.fetch;
+    const originalGetPaymentRequiredResponse = x402HTTPClient.prototype.getPaymentRequiredResponse;
+    const originalCreatePaymentPayload = x402HTTPClient.prototype.createPaymentPayload;
+
+    const mismatchedBody = {
+      ...VALID_402_BODY,
+      accepts: [{ ...VALID_402_BODY.accepts[0], price: "9.99" }],
+    };
+    x402HTTPClient.prototype.getPaymentRequiredResponse = () => mismatchedBody as never;
+    let createPaymentPayloadCalls = 0;
+    x402HTTPClient.prototype.createPaymentPayload = async () => {
+      createPaymentPayloadCalls += 1;
+      return {
+        x402Version: 2,
+        payload: "stub-payload",
+        resource: "https://example.com/appraise",
+        accepted: mismatchedBody.accepts[0],
+        extensions: {},
+      } as never;
+    };
+
+    globalThis.fetch = async () =>
+      buildResponse(402, JSON.stringify(mismatchedBody), {
+        "x402-version": "2",
+        "x402-payment-required": "1",
+      });
+
+    try {
+      await assert.rejects(
+        () => paidFetch("https://example.com/appraise"),
+        (err: unknown) => {
+          assert.ok(err instanceof X402PaymentError);
+          assert.doesNotMatch(err.message, /9\.99|stub-payload|raw/i);
+          return true;
+        },
+      );
+      assert.equal(createPaymentPayloadCalls, 0);
+    } finally {
+      globalThis.fetch = originalFetch;
+      x402HTTPClient.prototype.getPaymentRequiredResponse = originalGetPaymentRequiredResponse;
+      x402HTTPClient.prototype.createPaymentPayload = originalCreatePaymentPayload;
+    }
+  });
+
+  test("does not pay an expired challenge", async () => {
+    const paidFetch = createPaidFetch({ secret: TEST_SECRET });
+    const originalFetch = globalThis.fetch;
+    const originalGetPaymentRequiredResponse = x402HTTPClient.prototype.getPaymentRequiredResponse;
+    const originalCreatePaymentPayload = x402HTTPClient.prototype.createPaymentPayload;
+
+    const expiredBody = {
+      ...VALID_402_BODY,
+      accepts: [{ ...VALID_402_BODY.accepts[0], maxTimeoutSeconds: 0 }],
+    };
+    x402HTTPClient.prototype.getPaymentRequiredResponse = () => expiredBody as never;
+    let createPaymentPayloadCalls = 0;
+    x402HTTPClient.prototype.createPaymentPayload = async () => {
+      createPaymentPayloadCalls += 1;
+      return {
+        x402Version: 2,
+        payload: "stub-payload",
+        resource: "https://example.com/appraise",
+        accepted: expiredBody.accepts[0],
+        extensions: {},
+      } as never;
+    };
+
+    globalThis.fetch = async () =>
+      buildResponse(402, JSON.stringify(expiredBody), {
+        "x402-version": "2",
+        "x402-payment-required": "1",
+      });
+
+    try {
+      await assert.rejects(
+        () => paidFetch("https://example.com/appraise"),
+        (err: unknown) => {
+          assert.ok(err instanceof X402PaymentError);
+          assert.doesNotMatch(err.message, /stub-payload|raw/i);
+          return true;
+        },
+      );
+      assert.equal(createPaymentPayloadCalls, 0);
+    } finally {
+      globalThis.fetch = originalFetch;
+      x402HTTPClient.prototype.getPaymentRequiredResponse = originalGetPaymentRequiredResponse;
+      x402HTTPClient.prototype.createPaymentPayload = originalCreatePaymentPayload;
+    }
+  });
+
   test("bounds diagnostics and redacts credential fields", () => {
     const diagnostic = sanitizePaymentErrorDiagnostic(JSON.stringify({ token: "secret", detail: "x".repeat(1000) }));
     assert.ok(diagnostic.length <= MAX_PAYMENT_ERROR_DIAGNOSTIC_LENGTH);

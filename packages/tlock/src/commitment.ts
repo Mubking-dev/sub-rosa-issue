@@ -11,6 +11,8 @@ import { sha256 } from "@noble/hashes/sha2.js";
 export const VALUE_BYTES = 16;
 export const NONCE_BYTES = 32;
 export const PREIMAGE_BYTES = VALUE_BYTES + NONCE_BYTES;
+/// H is a sha256 digest — the width the contract declares as BytesN<32>.
+export const COMMITMENT_BYTES = 32;
 
 const I128_MAX = (1n << 127n) - 1n;
 const I128_MIN = -(1n << 127n);
@@ -70,6 +72,27 @@ export function decodeBidPreimage(preimage: Uint8Array): {
 /// H = sha256(be16(value) ‖ nonce). 32 bytes.
 export function commitment(value: bigint, nonce: Uint8Array): Uint8Array {
   return sha256(encodeBidPreimage(value, nonce));
+}
+
+/// True when `expected` is the commitment for this value and nonce.
+///
+/// The one acceptance rule for "is this commitment the seal of this bid". The
+/// sealer derives H with `commitment` and the contract re-derives it at reveal;
+/// every off-chain check that has to answer the same question — the SDK's
+/// pre-commit gate, the receipt verifier — goes through here so no caller can
+/// drift onto a different hash. Returns false for a wrong-width `expected`
+/// rather than throwing, so a malformed commitment is just a mismatch.
+export function commitmentMatches(
+  value: bigint,
+  nonce: Uint8Array,
+  expected: Uint8Array,
+): boolean {
+  if (expected.length !== COMMITMENT_BYTES) return false;
+  if (nonce.length !== NONCE_BYTES) return false;
+  const actual = commitment(value, nonce);
+  let diff = 0;
+  for (let i = 0; i < COMMITMENT_BYTES; i++) diff |= actual[i] ^ expected[i];
+  return diff === 0;
 }
 
 export function toHex(bytes: Uint8Array): string {

@@ -61,6 +61,27 @@ export function roundStatusLabel(status: RoundStatus): string {
   return ROUND_STATUS_LABELS[status];
 }
 
+// Coarse UI phases derived from a round status. The web dashboard must render
+// one of these names so it cannot invent a fourth phase label that drifts from
+// the keeper vocabulary above.
+export type RoundPhase = "Open" | "Reveal" | "Settled";
+
+export const ROUND_PHASES: readonly RoundPhase[] = ["Open", "Reveal", "Settled"];
+
+export const ROUND_PHASE_LABELS: Record<RoundPhase, string> = {
+  Open: "Open",
+  Reveal: "Reveal",
+  Settled: "Settled",
+};
+
+export function roundPhaseLabel(phase: RoundPhase): string {
+  return ROUND_PHASE_LABELS[phase];
+}
+
+export function isRoundPhase(value: string): value is RoundPhase {
+  return (ROUND_PHASES as readonly string[]).includes(value);
+}
+
 export function isKeeperRoundActive(view: KeeperRoundStatusView): boolean {
   return isActiveRoundStatus(view.status);
 }

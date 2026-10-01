@@ -18,6 +18,7 @@ import { describe, it, beforeEach, afterEach } from "node:test";
 import * as assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { FakeClock } from "@sub-rosa/time";
 import { KeeperStore } from "./store.js";
 import { createSettlementGuard, type SettlementGuard } from "./settlement-guard.js";
 
@@ -38,6 +39,7 @@ interface ReplayAction {
   kind:
     | "process" // keeper tick executed
     | "skip-terminal" // skipped because status is Settled/Voided
+    | "skip-leased" // skipped because another worker holds the round lease
     | "settle-skip-duplicate" // settlement guard blocked a duplicate settle
     | "store-updated"; // store was updated after processing
   statusBefore: string;
@@ -159,12 +161,17 @@ function populateStore(store: KeeperStore, fixture: FixtureRound[]): void {
   }
 }
 
-/** Run one round of queue processing and record actions. */
+/** Run one round of queue processing and record actions.
+ *
+ *  When `leaseOwner` is given the pass mirrors the watch loop: it claims each
+ *  round before scheduling it and gives the round back once it goes terminal.
+ */
 async function processQueue(
   store: KeeperStore,
   settlementGuard: SettlementGuard,
   contractId: string,
   actions: ReplayAction[],
+  leaseOwner?: string,
 ): Promise<void> {
   const allRounds = store.listRounds().filter((r) => {
     if (r.contractId !== contractId) return false;
@@ -187,6 +194,19 @@ async function processQueue(
       continue;
     }
 
+    if (leaseOwner) {
+      const claim = store.claimRound(roundId, { owner: leaseOwner, contractId });
+      if (!claim.claimed) {
+        actions.push({
+          roundId,
+          kind: "skip-leased",
+          statusBefore,
+          statusAfter: statusBefore,
+        });
+        continue;
+      }
+    }
+
     const statusAfter = await simulateProcessRound(
       roundId,
       statusBefore,
@@ -201,6 +221,10 @@ async function processQueue(
       statusBefore,
       statusAfter,
     });
+
+    if (leaseOwner && isTerminalStatus(statusAfter)) {
+      store.releaseLease(roundId, { owner: leaseOwner, contractId });
+    }
   }
 }
 
@@ -426,5 +450,58 @@ describe("Queue fixture replay", () => {
       processed2.some((a) => a.roundId === 32n),
       "round 32 should be processed in cycle 2",
     );
+  });
+
+  // ── 7. Exclusive round lease ───────────────────────────────────────────
+
+  it("gives a leased round to a single worker and recovers it after expiry", async () => {
+    const clock = new FakeClock(1_700_000_000_000);
+    const workerA = new KeeperStore(TEST_STORE_PATH, undefined, clock);
+    const workerB = new KeeperStore(TEST_STORE_PATH, undefined, clock);
+    const guardB = createSettlementGuard(clock);
+
+    workerA.addRound(50n, { lastStatus: "Open", contractId: "CTEST" });
+    workerB.addRound(50n, { lastStatus: "Open", contractId: "CTEST" });
+
+    // worker-a is mid-tick on the round when worker-b scans the queue.
+    assert.equal(
+      workerA.claimRound(50n, { owner: "worker-a", contractId: "CTEST" }).claimed,
+      true,
+    );
+
+    const blocked: ReplayAction[] = [];
+    await processQueue(workerB, guardB, "CTEST", blocked, "worker-b");
+
+    assert.ok(blocked.some((a) => a.kind === "skip-leased" && a.roundId === 50n));
+    assert.ok(
+      !blocked.some((a) => a.kind === "process"),
+      "the second worker must not schedule a round worker-a is holding",
+    );
+    assert.equal(workerA.getLease(50n, { contractId: "CTEST" })?.owner, "worker-a");
+
+    // A crashed owner stops holding the round: the lease expires on the clock.
+    clock.advance(1_000_000);
+    const recovered: ReplayAction[] = [];
+    await processQueue(workerB, guardB, "CTEST", recovered, "worker-b");
+
+    assert.equal(recovered.filter((a) => a.kind === "process").length, 1);
+    assert.equal(workerB.getRound(50n)?.lastStatus, "Settled");
+    assert.equal(
+      workerB.getLease(50n, { contractId: "CTEST" }),
+      undefined,
+      "a terminal round releases the lease",
+    );
+
+    // A settled round is never scheduled again, by any worker.
+    const settled: ReplayAction[] = [];
+    await processQueue(
+      new KeeperStore(TEST_STORE_PATH, undefined, clock),
+      createSettlementGuard(clock),
+      "CTEST",
+      settled,
+      "worker-c",
+    );
+    assert.ok(settled.some((a) => a.kind === "skip-terminal" && a.roundId === 50n));
+    assert.equal(settled.filter((a) => a.kind === "process").length, 0);
   });
 });

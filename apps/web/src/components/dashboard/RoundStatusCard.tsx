@@ -1,9 +1,10 @@
 // Copyright (c) 2026 Sub Rosa contributors
 import { useDrandCountdown, formatCountdown } from "../../hooks/useDrandCountdown";
 import { shortAddr } from "../../lib/format";
-import { classifyRoundPhase, type RoundPhase } from "../../lib/round-phase";
+import type { DashboardPhase } from "@sub-rosa/sdk";
 import { useTime } from "../../lib/time";
 import type { DashboardData, RoundStatus } from "../../dashboard/types";
+import type { DashboardSnapshot } from "@sub-rosa/sdk";
 
 function StatusPill({ status }: { status: RoundStatus }) {
   const tone =
@@ -18,7 +19,7 @@ function StatusPill({ status }: { status: RoundStatus }) {
   return <span className={`dashboard-status-pill ${tone}`}>{status}</span>;
 }
 
-function PhasePill({ phase }: { phase: RoundPhase }) {
+function PhasePill({ phase }: { phase: DashboardPhase }) {
   const tone =
     phase === "Settled" ? "success" : phase === "Reveal" ? "warning" : "info";
 
@@ -57,16 +58,20 @@ function DeadlineRow({
   );
 }
 
-export function RoundStatusCard({ data }: { data: DashboardData }) {
+export function RoundStatusCard({
+  data,
+  snapshot,
+}: {
+  data: DashboardData;
+  snapshot: DashboardSnapshot;
+}) {
   const { clock } = useTime();
   const drand = useDrandCountdown(data.round.revealRound);
   const now = clock.nowSeconds();
   const commitPast = now > data.round.commitDeadline;
   const revealPast = now > data.round.revealDeadline;
-  const phase = classifyRoundPhase({
-    status: data.round.status,
-    drandPublished: drand.published,
-  });
+  // Use the shared snapshot phase so both cards always agree.
+  const phase = snapshot.phase;
   const drandDetail = drand.published
     ? `R ${data.round.revealRound.toLocaleString()} has already published`
     : `${formatCountdown(drand.secondsRemaining)} until R ${data.round.revealRound.toLocaleString()}`;
@@ -91,7 +96,7 @@ export function RoundStatusCard({ data }: { data: DashboardData }) {
 
         <div className="dashboard-kv-row">
           <span className="dashboard-kv-label">Round ID</span>
-          <span className="dashboard-kv-value">{data.meta.roundId}</span>
+          <span className="dashboard-kv-value">{snapshot.roundId}</span>
         </div>
 
         <div className="dashboard-kv-row">

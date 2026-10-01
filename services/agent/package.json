@@ -17,7 +17,7 @@
   },
   "scripts": {
     "start": "node --import tsx src/run.ts",
-    "test": "node --import tsx --test src/mandate.test.ts src/bidder.test.ts src/mandate-cap-negative.test.ts",
+    "test": "node --import tsx --test src/mandate.test.ts src/bidder.test.ts src/mandate-cap-negative.test.ts src/appraisal-quote.test.ts",
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {

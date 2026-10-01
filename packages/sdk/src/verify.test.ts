@@ -11,10 +11,23 @@ import assert from "node:assert/strict";
 import { StrKey } from "@stellar/stellar-sdk";
 import { commitment } from "@sub-rosa/tlock";
 import { verifyReceipt } from "./verify.js";
-import { networkFingerprint, type RoundReceipt } from "./receipt.js";
+import { verifyReceiptEvents } from "./receipt-events.js";
+import { expectedRoundEventSequence, ROUND_EVENT_PHASE_BY_NAME } from "@sub-rosa/round-bindings/event-snapshot";
+import { networkFingerprint, type RoundReceipt, type RoundReceiptEvent } from "./receipt.js";
 
 const TESTNET = "Test SDF Network ; September 2015";
 const TESTNET_FP = networkFingerprint(TESTNET);
+
+/** Ordered lifecycle event log for a healthy settled round. */
+export function makeValidEventLog(roundId: string): RoundReceiptEvent[] {
+  return expectedRoundEventSequence(BigInt(roundId)).map(({ name }, i) => ({
+    name,
+    topics: ["symbol_short", "u64"] as const,
+    roundId,
+    ledger: 100 + i,
+    phase: ROUND_EVENT_PHASE_BY_NAME[name],
+  }));
+}
 
 function makeValidV1Receipt(): RoundReceipt {
   const bidder = StrKey.encodeEd25519PublicKey(Buffer.alloc(32, 0x01));
@@ -52,6 +65,7 @@ function makeValidV1Receipt(): RoundReceipt {
     winner: bidder,
     winningValue: value.toString(),
     status: "Settled",
+    events: makeValidEventLog("1"),
   };
 }
 
@@ -112,4 +126,141 @@ test("version 1: valid receipt passes without unsupported_version issue", () => 
   assert.equal(versionIssues.length, 0);
   assert.equal(result.computedWinner.address, receipt.winner);
   assert.equal(result.computedWinner.value?.toString(), receipt.winningValue);
+});
+
+// ── Ordered on-chain event verification (issue #379) ────────────────────
+
+test("receipt with the full ordered lifecycle event log verifies", () => {
+  const receipt = makeValidV1Receipt();
+  const result = verifyReceipt(receipt);
+  assert.equal(result.valid, true, JSON.stringify(result.issues));
+  assert.deepEqual(result.issues, []);
+});
+
+test("receipt missing the settle event fails verification", () => {
+  const receipt = makeValidV1Receipt();
+  receipt.events = receipt.events.filter((e) => e.name !== "settled");
+  const result = verifyReceipt(receipt);
+  assert.equal(result.valid, false);
+  const missing = result.issues.filter((i) => i.code === "missing_events_required");
+  assert.equal(missing.length, 1);
+  assert.match(missing[0]!.message, /"settled"/);
+});
+
+test("reordered events fail verification", () => {
+  const receipt = makeValidV1Receipt();
+  // Swap cleared before commit — a sequence the ledger could not produce.
+  const commitIdx = receipt.events.findIndex((e) => e.name === "commit");
+  const clearedIdx = receipt.events.findIndex((e) => e.name === "cleared");
+  const tmp = receipt.events[commitIdx]!;
+  receipt.events[commitIdx] = receipt.events[clearedIdx]!;
+  receipt.events[clearedIdx] = tmp;
+  const result = verifyReceipt(receipt);
+  assert.equal(result.valid, false);
+  assert.ok(result.issues.some((i) => i.code === "event_not_in_ledger_order"));
+});
+
+test("duplicate settle events fail verification", () => {
+  const receipt = makeValidV1Receipt();
+  receipt.events.push({
+    ...receipt.events.find((e) => e.name === "settled")!,
+    ledger: 9999,
+  });
+  const result = verifyReceipt(receipt);
+  assert.equal(result.valid, false);
+  const dup = result.issues.filter((i) => i.code === "duplicate_settle_event");
+  assert.equal(dup.length, 1);
+  assert.match(dup[0]!.message, /settles at most once/);
+});
+
+test("a receipt from another contract fails verification when expectedContractId is given", () => {
+  const receipt = makeValidV1Receipt();
+  const expected = StrKey.encodeContract(Buffer.alloc(32, 0x07));
+  const result = verifyReceipt(receipt, { expectedContractId: expected });
+  assert.equal(result.valid, false);
+  const mismatch = result.issues.filter((i) => i.code === "event_contract_mismatch");
+  assert.equal(mismatch.length, 1);
+  assert.match(mismatch[0]!.message, /expected/);
+});
+
+test("a receipt from another network fails verification when expectedNetworkPassphrase is given", () => {
+  const receipt = makeValidV1Receipt();
+  receipt.network = "Other Network ; January 2030";
+  receipt.networkFingerprint = networkFingerprint(receipt.network);
+  const result = verifyReceipt(receipt, {
+    expectedNetworkPassphrase: TESTNET,
+  });
+  assert.equal(result.valid, false);
+  assert.ok(result.issues.some((i) => i.code === "event_network_mismatch"));
+});
+
+test("consistent self-contained network tampering is caught by expectedNetworkPassphrase", () => {
+  // The fingerprint-only check cannot see a receipt whose network and
+  // networkFingerprint were rewritten together. The caller-supplied expected
+  // passphrase closes that gap.
+  const receipt = makeValidV1Receipt();
+  receipt.network = "Other Network ; January 2030";
+  receipt.networkFingerprint = networkFingerprint(receipt.network);
+  const withoutPin = verifyReceipt(receipt);
+  assert.equal(withoutPin.valid, true, "fingerprint alone must stay consistent");
+  const withPin = verifyReceipt(receipt, {
+    expectedNetworkPassphrase: TESTNET,
+  });
+  assert.equal(withPin.valid, false);
+});
+
+test("event referencing a different round id fails verification", () => {
+  const receipt = makeValidV1Receipt();
+  receipt.events[3]!.roundId = "2";
+  const result = verifyReceipt(receipt);
+  assert.equal(result.valid, false);
+  assert.ok(result.issues.some((i) => i.code === "event_round_id_mismatch"));
+});
+
+test("scrambled topic tuple fails verification", () => {
+  const receipt = makeValidV1Receipt();
+  (receipt.events[0] as any).topics = ["u64", "symbol_short"];
+  const result = verifyReceipt(receipt);
+  assert.equal(result.valid, false);
+  assert.ok(result.issues.some((i) => i.code === "invalid_event_topics"));
+});
+
+test("event phase inconsistent with its name fails verification", () => {
+  const receipt = makeValidV1Receipt();
+  (receipt.events.find((e) => e.name === "settled") as any).phase = "round-created";
+  const result = verifyReceipt(receipt);
+  assert.equal(result.valid, false);
+  assert.ok(result.issues.some((i) => i.code === "event_phase_mismatch"));
+});
+
+test("unknown event name fails verification", () => {
+  const receipt = makeValidV1Receipt();
+  (receipt.events[0] as any).name = "liquidated";
+  const result = verifyReceipt(receipt);
+  assert.equal(result.valid, false);
+  assert.ok(result.issues.some((i) => i.code === "unknown_event_name"));
+});
+
+test("receipt with no event log at all fails verification", () => {
+  const receipt = makeValidV1Receipt();
+  (receipt as any).events = undefined;
+  const result = verifyReceipt(receipt);
+  assert.equal(result.valid, false);
+  assert.ok(result.issues.some((i) => i.code === "missing_events"));
+});
+
+test("verifyReceiptEvents: exported helper agrees with verifyReceipt on the missing-settle case", () => {
+  const receipt = makeValidV1Receipt();
+  receipt.events = receipt.events.filter((e) => e.name !== "settled");
+  const direct = verifyReceiptEvents(receipt);
+  assert.equal(direct.valid, false);
+  assert.ok(direct.issues.some((i) => i.code === "missing_events_required"));
+});
+
+test("version rejection still short-circuits before event checks", () => {
+  const receipt = { ...makeValidV1Receipt(), version: 2 } as any;
+  const result = verifyReceipt(receipt);
+  assert.equal(result.valid, false);
+  assert.equal(result.issues.length, 1);
+  assert.equal(result.issues[0].code, "unsupported_version");
 });

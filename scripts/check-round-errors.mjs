@@ -15,8 +15,35 @@ import { pathToFileURL } from "node:url";
 
 const DEFAULT_TYPES = "contracts/round/src/types.rs";
 const DEFAULT_DOC = "contracts/round/ERRORS.md";
+const DEFAULT_SDK = "packages/sdk/src/errors.ts";
 
 /** @typedef {{ name: string, code: number }} ErrorVariant */
+
+/**
+ * @param {string} content
+ * @returns {ErrorVariant[]}
+ */
+export function parseSdkErrors(content) {
+  const enumMatch = content.match(
+    /export const ROUND_CONTRACT_ERRORS[^{]*\{([\s\S]*?)\n\}\);/,
+  );
+  if (!enumMatch) {
+    throw new Error("Could not find `ROUND_CONTRACT_ERRORS` in errors.ts");
+  }
+
+  /** @type {ErrorVariant[]} */
+  const variants = [];
+  for (const line of enumMatch[1].split("\n")) {
+    const match = line.match(/^\s*(\d+):\s*\{\s*code:\s*(\d+),\s*name:\s*"(\w+)"/);
+    if (match) {
+      variants.push({ name: match[3], code: Number(match[2]) });
+    }
+  }
+  if (variants.length === 0) {
+    throw new Error("No Error variants parsed from errors.ts");
+  }
+  return variants;
+}
 
 /**
  * @param {string} content
@@ -108,9 +135,11 @@ function loadFile(pathArg, fallback) {
 function main() {
   const typesPath = process.argv[2] || DEFAULT_TYPES;
   const docPath = process.argv[3] || DEFAULT_DOC;
+  const sdkPath = process.argv[4] || DEFAULT_SDK;
 
   const typesFile = loadFile(typesPath, DEFAULT_TYPES);
   const docFile = loadFile(docPath, DEFAULT_DOC);
+  const sdkFile = loadFile(sdkPath, DEFAULT_SDK);
 
   if (typesFile.content === null) {
     diagnostics.error("fail-types-file-not-found", `[FAIL] types file not found: ${typesFile.path}`);
@@ -130,10 +159,20 @@ function main() {
   diagnostics.info("errors-md", `  ERRORS.md: ${fromDoc.length} rows`);
 
   const failures = diffVariants(fromTypes, fromDoc, "types.rs", "ERRORS.md");
+
+  if (sdkFile.content !== null) {
+    const fromSdk = parseSdkErrors(sdkFile.content);
+    diagnostics.info("sdk-errors", `  SDK errors: ${fromSdk.length} variants`);
+    failures.push(...diffVariants(fromTypes, fromSdk, "types.rs", "errors.ts"));
+  }
+
   diagnostics.info("progress-2", "=".repeat(72));
 
   if (failures.length === 0) {
-    diagnostics.info("pass-types-rs-and-errors-md-list-the-same-error-codes", "PASS  types.rs and ERRORS.md list the same error codes.");
+    diagnostics.info(
+      "pass-types-rs-and-errors-md-list-the-same-error-codes",
+      "PASS  types.rs, ERRORS.md, and SDK list the same error codes.",
+    );
     process.exit(0);
   }
 
@@ -141,7 +180,10 @@ function main() {
   for (const failure of failures) {
     diagnostics.error("progress-3", `  - ${failure}`);
   }
-  diagnostics.error("update-contracts-round-src-types-rs-and-contracts-round", "\nUpdate contracts/round/src/types.rs and contracts/round/ERRORS.md together.");
+  diagnostics.error(
+    "update-contracts-round-src-types-rs-and-contracts-round",
+    "\nUpdate contracts/round/src/types.rs, contracts/round/ERRORS.md, and packages/sdk/src/errors.ts together.",
+  );
   process.exit(1);
 }
 

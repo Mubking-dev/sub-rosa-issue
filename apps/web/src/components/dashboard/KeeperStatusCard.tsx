@@ -1,6 +1,7 @@
 // Copyright (c) 2026 Sub Rosa contributors
 import { shortHash } from "../../lib/format";
 import type { DashboardData, KeeperDryRunPhase } from "../../dashboard/types";
+import type { DashboardSnapshot } from "@sub-rosa/sdk";
 
 function PhaseBadge({ phase }: { phase: KeeperDryRunPhase }) {
   const tone =
@@ -17,17 +18,48 @@ function PhaseBadge({ phase }: { phase: KeeperDryRunPhase }) {
   return <span className={`dashboard-phase-badge ${tone}`}>{label}</span>;
 }
 
-export function KeeperStatusCard({ data }: { data: DashboardData }) {
+export function KeeperStatusCard({
+  data,
+  snapshot,
+}: {
+  data: DashboardData;
+  snapshot: DashboardSnapshot;
+}) {
   const { keeper } = data;
+  // Use the shared snapshot cursor so both cards always agree on the keeper
+  // phase slug.  When a keeper error is present, show the last verified phase
+  // as stale rather than hiding it.
+  const cursor = snapshot.keeperCursor as KeeperDryRunPhase;
 
   return (
     <section className="dashboard-card keeper-status-card">
       <header className="dashboard-card-header">
         <h2>Keeper Status</h2>
-        <PhaseBadge phase={keeper.currentPhase} />
+        <PhaseBadge phase={cursor} />
+        {snapshot.keeperError && (
+          <span className="dashboard-status-pill error" title={snapshot.keeperError}>
+            error (stale)
+          </span>
+        )}
       </header>
 
       <div className="dashboard-card-body">
+        {snapshot.keeperError && (
+          <div className="dashboard-keeper-error" role="alert">
+            <strong>Keeper error:</strong> {snapshot.keeperError}
+          </div>
+        )}
+
+        <div className="dashboard-kv-row">
+          <span className="dashboard-kv-label">Round ID</span>
+          <span className="dashboard-kv-value">{snapshot.roundId}</span>
+        </div>
+
+        <div className="dashboard-kv-row">
+          <span className="dashboard-kv-label">Phase</span>
+          <span className="dashboard-kv-value highlight">{snapshot.phase}</span>
+        </div>
+
         <div className="dashboard-kv-row">
           <span className="dashboard-kv-label">Next Action</span>
           <span className="dashboard-kv-value">{keeper.nextAction}</span>

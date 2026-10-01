@@ -207,3 +207,50 @@ test("invalid VITE_RPC_URL error message is actionable", () => {
   const msg = issues.find((i) => i.key === "VITE_RPC_URL")!.message;
   assert.ok(msg.includes("must start with http:// or https://"));
 });
+
+test("matching VITE_PASSKEY_CONTRACT_ID and VITE_CONTRACT_ID passes without issue", () => {
+  const issues = validatePublicConfig({
+    VITE_RPC_URL: "https://custom-soroban.example.com",
+    VITE_NETWORK_PASSPHRASE: "Custom Network",
+    VITE_CONTRACT_ID: "CA7KSDEYJEPGZEB2ZROTLUWKQQ6GIRIQNGG6Z745MZ34QHP4UJPWODEX",
+    VITE_PASSKEY_CONTRACT_ID: "CA7KSDEYJEPGZEB2ZROTLUWKQQ6GIRIQNGG6Z745MZ34QHP4UJPWODEX",
+    VITE_PASSKEY_NETWORK_PASSPHRASE: "Custom Network",
+  });
+  const passkeyIssues = issues.filter(
+    (i) => i.key === "VITE_PASSKEY_CONTRACT_ID" || i.key === "VITE_PASSKEY_NETWORK_PASSPHRASE",
+  );
+  assert.equal(passkeyIssues.length, 0);
+});
+
+test("swapped VITE_PASSKEY_CONTRACT_ID is reported as configuration mismatch", () => {
+  const issues = validatePublicConfig({
+    VITE_RPC_URL: "https://custom-soroban.example.com",
+    VITE_NETWORK_PASSPHRASE: "Custom Network",
+    VITE_CONTRACT_ID: "CA7KSDEYJEPGZEB2ZROTLUWKQQ6GIRIQNGG6Z745MZ34QHP4UJPWODEX",
+    VITE_PASSKEY_CONTRACT_ID: "CC2QMOXZERI6UOR67YKSORT7QTUHQ5QUGMHQBYVP23YM3NMUNNOEOGZY",
+  });
+  assert.ok(
+    issues.some(
+      (i) =>
+        i.key === "VITE_PASSKEY_CONTRACT_ID" &&
+        i.message.includes("does not match VITE_CONTRACT_ID"),
+    ),
+  );
+});
+
+test("swapped VITE_PASSKEY_NETWORK_PASSPHRASE is reported as configuration mismatch", () => {
+  const issues = validatePublicConfig({
+    VITE_RPC_URL: "https://custom-soroban.example.com",
+    VITE_NETWORK_PASSPHRASE: "Custom Network",
+    VITE_CONTRACT_ID: "CA7KSDEYJEPGZEB2ZROTLUWKQQ6GIRIQNGG6Z745MZ34QHP4UJPWODEX",
+    VITE_PASSKEY_NETWORK_PASSPHRASE: "Public Global Stellar Network ; September 2015",
+  });
+  assert.ok(
+    issues.some(
+      (i) =>
+        i.key === "VITE_PASSKEY_NETWORK_PASSPHRASE" &&
+        i.message.includes("does not match VITE_NETWORK_PASSPHRASE"),
+    ),
+  );
+});
+

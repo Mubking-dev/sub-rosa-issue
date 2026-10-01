@@ -12,6 +12,11 @@
  *   3. Commitment hash is verifiable offline using node:crypto sha256.
  *   4. Winner matches the highest bid in the fixture.
  *   5. The template process (FIXTURE=1) exits 0 and emits FIXTURE PASSED.
+ *   6. Template rules (issue #388):
+ *      - settle is refused during the commit phase (SDK predicate gate),
+ *      - settle is refused when escrow conservation would fail,
+ *      - a bid sealed for a different Drand round is refused,
+ *      - a full happy-path fixture still settles (fixture smoke + gate).
  */
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
@@ -19,6 +24,13 @@ import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { test } from "node:test";
+
+import {
+  checkEscrowConservation,
+  checkSealRound,
+  templatePhaseGate,
+} from "./template-rules.js";
+import type { RoundReceipt } from "@sub-rosa/sdk";
 
 // ---------------------------------------------------------------------------
 // Helpers (mirrors @sub-rosa/tlock commitment logic without importing it)
@@ -58,6 +70,16 @@ type AnyObj = Record<string, any>;
 
 function loadFixture(): AnyObj {
   return JSON.parse(readFileSync(FIXTURE_PATH, "utf8")) as AnyObj;
+}
+
+/** Cast a plain fixture object to the SDK receipt shape for the rule helpers. */
+function asReceipt(raw: AnyObj): RoundReceipt {
+  return raw as unknown as RoundReceipt;
+}
+
+/** A minimal settled receipt derived from the golden fixture. */
+function settledReceipt(): RoundReceipt {
+  return asReceipt(loadFixture());
 }
 
 // ---------------------------------------------------------------------------
@@ -185,4 +207,103 @@ test("template: fixture mode exits 0 and emits expected output", () => {
   assert.ok(stdout.includes("verdict: PASS"), "Expected verdict: PASS in output");
   // Receipt-oriented output: winner line present
   assert.ok(stdout.includes("computed winner:"), "Expected computed winner line");
+  // Issue #388: the conservation preflight ran and reported before settle.
+  assert.ok(
+    stdout.includes("conservation holds"),
+    "Expected the escrow conservation preflight to pass in fixture output",
+  );
+});
+
+// ---------------------------------------------------------------------------
+// 6. Template rules — SDK phase gate (issue #388)
+// ---------------------------------------------------------------------------
+test("template rules: settle is rejected during the commit phase", () => {
+  const refusal = templatePhaseGate("Open", "settle");
+  assert.ok(refusal, "commit-phase settle must be refused");
+  assert.match(refusal.reason, /not Cleared/);
+
+  const revealing = templatePhaseGate("Revealing", "settle");
+  assert.ok(revealing, "revealing-phase settle must be refused");
+});
+
+test("template rules: settle is accepted once the SDK phase is Cleared/Settled", () => {
+  assert.equal(templatePhaseGate("Cleared", "settle"), null);
+  assert.equal(templatePhaseGate("Settled", "settle"), null);
+});
+
+test("template rules: clear requires the SDK Revealing phase", () => {
+  assert.equal(templatePhaseGate("Revealing", "clear"), null);
+  const refusal = templatePhaseGate("Cleared", "clear");
+  assert.ok(refusal, "clearing from Cleared must be refused (already cleared)");
+  assert.match(refusal.reason, /Revealing/);
+});
+
+test("template rules: reveal requires the SDK Revealing phase", () => {
+  assert.equal(templatePhaseGate("Revealing", "reveal"), null);
+  assert.ok(templatePhaseGate("Open", "reveal"), "reveal during Open must be refused");
+  assert.ok(templatePhaseGate("Settled", "reveal"), "reveal after Settled must be refused");
+});
+
+// ---------------------------------------------------------------------------
+// 7. Template rules — escrow conservation preflight (issue #388)
+// ---------------------------------------------------------------------------
+test("template rules: golden fixture passes the conservation preflight", () => {
+  const check = checkEscrowConservation(settledReceipt());
+  assert.equal(check.ok, true, `expected conservation to hold: ${check.reason}`);
+  assert.ok(check.totalEscrow > 0n);
+});
+
+test("template rules: settle is rejected when conservation would fail", () => {
+  const receipt = settledReceipt();
+  // Inflate the winning value above the winner's escrow — the exact
+  // EscrowTooSmall grief the contract rejects at clear.
+  const winner = receipt.winner!;
+  receipt.winningValue = (BigInt(receipt.bids[winner]!.escrow) + 1n).toString();
+
+  const check = checkEscrowConservation(receipt);
+  assert.equal(check.ok, false, "winning value above winner escrow must fail conservation");
+  assert.match(check.reason, /exceeds winner escrow/);
+});
+
+test("template rules: conservation flags a winner missing from bids", () => {
+  const receipt = settledReceipt();
+  (receipt as unknown as AnyObj).winner = "GNOTABIDDER";
+  const check = checkEscrowConservation(receipt);
+  assert.equal(check.ok, false);
+  assert.match(check.reason, /missing from bids/);
+});
+
+// ---------------------------------------------------------------------------
+// 8. Template rules — seal / Drand round binding (issue #388)
+// ---------------------------------------------------------------------------
+test("template rules: a bid sealed for a different Drand round is refused", () => {
+  const refusal = checkSealRound(4_000_000, 4_000_015);
+  assert.ok(refusal, "mismatched seal round must be refused");
+  assert.match(refusal.reason, /sealed for Drand round 4000000/);
+  assert.match(refusal.reason, /R=4000015/);
+
+  assert.equal(checkSealRound(4_000_015, 4_000_015), null, "matching rounds pass");
+});
+
+// ---------------------------------------------------------------------------
+// 9. Happy path end-to-end (offline): a full fixture still settles
+// ---------------------------------------------------------------------------
+test("template rules: full happy-path fixture passes every gate and settles", () => {
+  const receipt = settledReceipt();
+
+  // The recorded fixture status comes from the SDK vocabulary and must be
+  // settleable…
+  const gate = templatePhaseGate(receipt.status as never, "settle");
+  assert.equal(gate, null, `settled fixture must pass the phase gate: ${gate?.reason}`);
+
+  // …conservation must hold…
+  const conservation = checkEscrowConservation(receipt);
+  assert.equal(conservation.ok, true, conservation.reason);
+
+  // …and every sealed round must match the round's reveal round.
+  assert.equal(
+    checkSealRound(receipt.revealRound, receipt.revealRound),
+    null,
+    "fixture reveal round must bind to itself",
+  );
 });

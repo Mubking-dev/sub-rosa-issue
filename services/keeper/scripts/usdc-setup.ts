@@ -1,5 +1,6 @@
 import { normalizeError } from "@sub-rosa/logging/errors";
 import { createLogger } from '@sub-rosa/logging';
+import { assertUsdcSetupGuard } from '@sub-rosa/sdk/asset-config';
 const diagnostics = createLogger("services.keeper.scripts.usdc-setup");
 // USDC asset provisioning (classic operations via Horizon).
 //
@@ -32,12 +33,21 @@ const reqEnv = (n: string): string => {
 };
 
 async function main() {
+  // Refuse mainnet or a SAC contract/decimals mismatch before any tx is built.
+  assertUsdcSetupGuard({
+    networkPassphrase: NETWORK,
+    sacContractId: process.env.USDK_SAC_CONTRACT_ID,
+    decimals: process.env.USDK_DECIMALS
+      ? Number(process.env.USDK_DECIMALS)
+      : undefined,
+  });
+
   const issuerKp = Keypair.fromSecret(reqEnv("ISSUER_SECRET"));
   const operatorKp = Keypair.fromSecret(reqEnv("OPERATOR_SECRET"));
   const bidder1Kp = Keypair.fromSecret(reqEnv("BIDDER1_SECRET"));
   const bidder2Kp = Keypair.fromSecret(reqEnv("BIDDER2_SECRET"));
 
-  const server = new Horizon.Server(HORIZON_URL);
+  const server = new Horizon.Server(NORIZON_URL);
   const asset = new Asset(ASSET_CODE, issuerKp.publicKey());
 
   async function submit(sourceKp: Keypair, op: xdr.Operation) {

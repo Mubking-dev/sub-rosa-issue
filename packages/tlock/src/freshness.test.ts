@@ -105,3 +105,37 @@ test("freshness: valid boundary round still classifies correctly", () => {
   assert.equal(publishAtMs, 1_001_000_000);
   assert.equal(classifyDrandRound(round, info, publishAtMs!).status, "fresh");
 });
+
+test("freshness: one millisecond before the boundary is future, at boundary is fresh", () => {
+  const info = { genesis_time: 1692803367, period: 3 };
+  const round = 10;
+  const publishAtMs = computePublishAtMs(info, round)!;
+
+  const before = classifyDrandRound(round, info, publishAtMs - 1);
+  assert.equal(before.status, "future");
+
+  const at = classifyDrandRound(round, info, publishAtMs);
+  assert.equal(at.status, "fresh");
+});
+
+test("freshness: a mutated period fails the fixture comparison", () => {
+  const info = { genesis_time: 1692803367, period: 3 };
+  const round = 10;
+  const fixturePublishAt = computePublishAtMs(info, round);
+
+  const mutatedInfo = { ...info, period: 4 };
+  const mutatedPublishAt = computePublishAtMs(mutatedInfo, round);
+
+  assert.notEqual(mutatedPublishAt, fixturePublishAt);
+});
+
+test("freshness: round stays fresh across the full period including the last second", () => {
+  const info = { genesis_time: 1692803367, period: 3 };
+  const round = 10;
+  const publishAtMs = computePublishAtMs(info, round)!;
+  const endOfPeriodMs = publishAtMs + info.period * 1000 - 1;
+
+  const during = classifyDrandRound(round, info, endOfPeriodMs);
+  assert.equal(during.status, "fresh");
+});
+

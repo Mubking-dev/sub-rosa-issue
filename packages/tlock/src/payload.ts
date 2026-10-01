@@ -13,9 +13,10 @@
 import { sha256 } from "@noble/hashes/sha2.js";
 import { timelockDecrypt, timelockEncrypt, Buffer as TlockBuffer } from "tlock-js";
 
-import { sealIdentity } from "./auditor.js";
+import { sealIdentityForBidder } from "./auditor.js";
 import { beBytesToI128, i128ToBeBytes, NONCE_BYTES, VALUE_BYTES } from "./commitment.js";
 import type { DrandClient } from "./quicknet.js";
+import { assertContractId, assertBidderId } from "./validate.js";
 
 const utf8Encode = new TextEncoder();
 const utf8Decode = new TextDecoder();
@@ -46,7 +47,12 @@ export interface PayloadEnvelope {
 }
 
 export interface SealPayloadParams extends PayloadEnvelope {
+  contractId: string;
+  bidderId: string;
   round: number;
+  /// The Drand round the auction committed to open (`Round::reveal_round`).
+  /// The seal must name exactly this round, or sealing is rejected.
+  revealRound: number;
   client: DrandClient;
   identity?: Uint8Array;
   auditorPublicKey?: Uint8Array;
@@ -148,7 +154,10 @@ export function payloadCommitment(envelope: PayloadEnvelope): Uint8Array {
 /** Timelock-encrypt a structured application payload to Drand round R. */
 export async function sealPayload(params: SealPayloadParams): Promise<SealedPayload> {
   const {
+    contractId,
+    bidderId,
     round,
+    revealRound,
     client,
     identity,
     auditorPublicKey,
@@ -156,6 +165,10 @@ export async function sealPayload(params: SealPayloadParams): Promise<SealedPayl
     nonce,
     payload,
   } = params;
+
+  assertContractId(contractId);
+  assertBidderId(bidderId);
+
   const envelope: PayloadEnvelope = {
     ...(amount === undefined ? {} : { amount }),
     nonce,
@@ -166,7 +179,11 @@ export async function sealPayload(params: SealPayloadParams): Promise<SealedPayl
 
   let auditorBlob = new Uint8Array(0);
   if (identity && auditorPublicKey) {
-    auditorBlob = new Uint8Array(sealIdentity(identity, auditorPublicKey));
+    // Bound to the payload commitment, so recovery can prove the identity
+    // belongs to this exact sealed payload (issue #382).
+    auditorBlob = new Uint8Array(
+      sealIdentityForBidder({ identity, round, commitment: sha256(encoded), auditorPublicKey }),
+    );
   } else if (identity || auditorPublicKey) {
     throw new Error("identity and auditorPublicKey must be provided together");
   }

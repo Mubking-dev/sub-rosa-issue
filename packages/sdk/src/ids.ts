@@ -38,6 +38,8 @@ export function normalizeRoundId(value: string | number | bigint): bigint {
   return parsed;
 }
 
+import { StrKey } from "@stellar/stellar-sdk";
+
 export function normalizeSorobanContractId(value: string): string {
   const trimmed = toTrimmedString(value);
   if (!trimmed) {
@@ -45,10 +47,22 @@ export function normalizeSorobanContractId(value: string): string {
   }
 
   const normalized = trimmed.toUpperCase();
-  if (!SOROBAN_CONTRACT_ID_RE.test(normalized)) {
-    throw new Error(
-      `contractId must be a valid Soroban contract id (C + 55 base32 chars), got ${JSON.stringify(trimmed)}`,
-    );
+  if (!StrKey.isValidContract(normalized)) {
+    throw new Error("contractId must be a valid Soroban contract id");
+  }
+
+  return normalized;
+}
+
+export function normalizeBidderId(value: string): string {
+  const trimmed = toTrimmedString(value);
+  if (!trimmed) {
+    throw new Error("bidderId must be a non-empty Stellar account id");
+  }
+
+  const normalized = trimmed.toUpperCase();
+  if (!StrKey.isValidEd25519PublicKey(normalized)) {
+    throw new Error("bidderId must be a valid Stellar account id");
   }
 
   return normalized;

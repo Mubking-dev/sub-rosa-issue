@@ -5,6 +5,8 @@ import type { UseCaseId } from "./config/useCases";
 import { hashFor, routeFromHash, type RouteState } from "./config/routing";
 import { ArchitecturePage } from "./pages/ArchitecturePage";
 import { ConfigBanner } from "./components/ConfigBanner";
+import { gateDemoActions } from "./lib/config";
+import { PUBLIC_ENV, SDK_CLIENT_IDENTITY } from "./lib/chain";
 import { DashboardPage } from "./pages/DashboardPage";
 import { DemoPage } from "./pages/DemoPage";
 import { LandingPage } from "./pages/LandingPage";
@@ -39,7 +41,7 @@ export default function App() {
         <DashboardPage goHome={() => navigate("landing")} />
       ) : (
         <>
-          <ConfigBanner />
+          <ConfigBanner gate={gateDemoActions(SDK_CLIENT_IDENTITY, PUBLIC_ENV)} />
           {route.page === "architecture" ? (
             <ArchitecturePage goHome={() => navigate("landing")} />
           ) : (

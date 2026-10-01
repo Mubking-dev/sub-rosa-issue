@@ -126,9 +126,12 @@ async function main() {
   const nonce = generateNonce();
   const identity = new TextEncoder().encode("bidder:smoke@sub-rosa");
   const sealed = await sealBid({
+    contractId,
+    bidderId: bidderKp.publicKey(),
     value,
     nonce,
     round: revealRound,
+    revealRound,
     client: drand,
     identity,
     auditorPublicKey: auditor.publicKey,
